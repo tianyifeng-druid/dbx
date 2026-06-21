@@ -821,6 +821,14 @@ export const useConnectionStore = defineStore("connection", () => {
     clearLoadedChildrenCache(connectionId);
     clearLoadedChildrenCache(`${connectionId}:${db}`);
     await loadDatabases(connectionId, { force: true });
+    // 保存 schema 过滤后，强制刷新数据库节点的 schema 子节点，
+    // 避免 setChildren 保留旧展开节点的旧 children（旧 schema 列表）
+    if (db) {
+      const dbNode = findNode(treeNodes.value, `${connectionId}:${db}`);
+      if (dbNode) {
+        await loadTreeNodeChildren(dbNode, { force: true });
+      }
+    }
   }
 
   async function reloadConnectionDatabaseChildren(connectionId: string) {

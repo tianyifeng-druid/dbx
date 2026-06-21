@@ -32,8 +32,9 @@ import { copyToClipboard } from "@/lib/clipboard";
 import { showAgentDriverInstallHint, type AgentDriverInstallState } from "@/lib/agentDriverInstallHint";
 import { ArrowLeft, ArrowDown, ArrowUp, CheckSquare, ChevronRight, CircleHelp, Copy, ExternalLink, FilePlus2, FolderOpen, GripVertical, Grid3X3, KeyRound, Link2, List, ListFilter, Loader2, Pipette, Plus, Search, ShieldCheck, Square, Trash2 } from "@lucide/vue";
 import { buildDraftVisibleDatabasesConnectionId, connectionCanChooseVisibleDatabases, initialVisibleDatabaseSelection, visibleDatabaseSelectionIsStale } from "@/lib/connectionVisibleDatabases";
-import { canSaveVisibleDatabaseSelection, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection, normalizeVisibleSchemaSelection, buildDraftVisibleSchemasConnectionId } from "@/lib/visibleDatabases";
+import { canSaveVisibleDatabaseSelection, filterDatabaseNamesForConnection, isSystemDatabaseName, normalizeVisibleDatabaseSelection, buildDraftVisibleSchemasConnectionId } from "@/lib/visibleDatabases";
 import { isSchemaAware } from "@/lib/databaseFeatureSupport";
+import VisibleSchemasDialog from "@/components/sidebar/VisibleSchemasDialog.vue";
 
 type DbOption = { value: string; label: string };
 type DbCategory = { key: string; title: string; options: DbOption[] };
@@ -101,8 +102,7 @@ const visibleDatabaseShowSystem = ref(false);
 const showVisibleSchemasDialog = ref(false);
 const isLoadingVisibleSchemas = ref(false);
 const visibleSchemaNames = ref<string[]>([]);
-const visibleSchemaSelection = ref<Set<string>>(new Set());
-const visibleSchemaSearchText = ref("");
+const visibleSchemaInitialSelection = ref<string[]>([]);
 const visibleSchemaError = ref("");
 let testRunId = 0;
 
@@ -1150,14 +1150,6 @@ const visibleSchemaSummary = computed(() => {
   if (!configured?.length) return t("visibleSchemas.showAll");
   return t("visibleSchemas.selectedCount", { selected: configured.length, total: visibleSchemaNames.value.length });
 });
-const filteredVisibleSchemaNames = computed(() => {
-  const query = visibleSchemaSearchText.value.trim().toLowerCase();
-  if (!query) return visibleSchemaNames.value;
-  return visibleSchemaNames.value.filter((name) => name.toLowerCase().includes(query));
-});
-const visibleSchemaSelectedCount = computed(() => visibleSchemaSelection.value.size);
-const visibleSchemaTotalCount = computed(() => visibleSchemaNames.value.length);
-const visibleSchemaCanSave = computed(() => visibleSchemaSelection.value.size > 0);
 const testResultMessage = computed(() => {
   if (!testResult.value) return "";
   return testResult.value.ok ? t("connection.testSuccess") : testResult.value.message;
@@ -1765,8 +1757,7 @@ function resetVisibleSchemasState() {
   showVisibleSchemasDialog.value = false;
   isLoadingVisibleSchemas.value = false;
   visibleSchemaNames.value = [];
-  visibleSchemaSelection.value = new Set();
-  visibleSchemaSearchText.value = "";
+  visibleSchemaInitialSelection.value = [];
   visibleSchemaError.value = "";
 }
 
@@ -1774,7 +1765,6 @@ async function openVisibleSchemasPicker() {
   if (!canChooseVisibleSchemas.value || isLoadingVisibleSchemas.value) return;
   isLoadingVisibleSchemas.value = true;
   visibleSchemaError.value = "";
-  visibleSchemaSearchText.value = "";
   const draftId = buildDraftVisibleSchemasConnectionId(uuid());
   try {
     const draftConfig: ConnectionConfig = {
@@ -1787,12 +1777,11 @@ async function openVisibleSchemasPicker() {
     visibleSchemaNames.value = names;
     const key = visibleSchemasDatabaseKey.value;
     const configured = form.value.visible_schemas?.[key];
-    const initial = Array.isArray(configured) ? normalizeVisibleSchemaSelection(configured, names) : names;
-    visibleSchemaSelection.value = new Set(initial);
+    visibleSchemaInitialSelection.value = Array.isArray(configured) ? configured : [];
     showVisibleSchemasDialog.value = true;
   } catch (e: any) {
     visibleSchemaNames.value = [];
-    visibleSchemaSelection.value = new Set();
+    visibleSchemaInitialSelection.value = [];
     visibleSchemaError.value = String(e?.message || e);
   } finally {
     isLoadingVisibleSchemas.value = false;
@@ -1800,39 +1789,18 @@ async function openVisibleSchemasPicker() {
   }
 }
 
-function toggleVisibleSchema(schema: string) {
-  const next = new Set(visibleSchemaSelection.value);
-  if (next.has(schema)) next.delete(schema);
-  else next.add(schema);
-  visibleSchemaSelection.value = next;
+function handleDraftSchemasSave(selectedNames: string[]) {
+  const key = visibleSchemasDatabaseKey.value;
+  form.value.visible_schemas = { ...(form.value.visible_schemas || {}), [key]: selectedNames };
 }
 
-function selectAllVisibleSchemas() {
-  visibleSchemaSelection.value = new Set(visibleSchemaNames.value);
-}
-
-function clearVisibleSchemaSelection() {
-  visibleSchemaSelection.value = new Set();
-}
-
-function showAllVisibleSchemas() {
+function handleDraftSchemasShowAll() {
   const key = visibleSchemasDatabaseKey.value;
   if (form.value.visible_schemas) {
     const next = { ...form.value.visible_schemas };
     delete next[key];
     form.value.visible_schemas = Object.keys(next).length > 0 ? next : undefined;
   }
-  visibleSchemaSelection.value = new Set();
-  visibleSchemaNames.value = [];
-  showVisibleSchemasDialog.value = false;
-}
-
-function saveVisibleSchemaSelection() {
-  if (!visibleSchemaCanSave.value) return;
-  const key = visibleSchemasDatabaseKey.value;
-  const normalized = normalizeVisibleSchemaSelection([...visibleSchemaSelection.value], visibleSchemaNames.value);
-  form.value.visible_schemas = { ...(form.value.visible_schemas || {}), [key]: normalized };
-  showVisibleSchemasDialog.value = false;
 }
 
 function applyConnectionUrl() {
@@ -3747,77 +3715,17 @@ function openExternalUrl(url: string) {
     </DialogContent>
   </Dialog>
 
-  <Dialog v-model:open="showVisibleSchemasDialog">
-    <DialogContent class="sm:max-w-[460px]">
-      <DialogHeader>
-        <DialogTitle>{{ t("visibleSchemas.title") }}</DialogTitle>
-        <p class="text-sm text-muted-foreground">
-          {{ t("visibleSchemas.description", { connection: form.name || selectedProfile().label }) }}
-        </p>
-      </DialogHeader>
-
-      <div class="flex items-center gap-2 rounded-md border bg-background px-2">
-        <Search class="h-4 w-4 shrink-0 text-muted-foreground" />
-        <Input v-model="visibleSchemaSearchText" :placeholder="t('visibleSchemas.searchPlaceholder')" class="h-8 border-0 px-0 shadow-none focus-visible:ring-0" :disabled="isLoadingVisibleSchemas || !!visibleSchemaError" />
-      </div>
-
-      <div class="flex items-center justify-between text-xs text-muted-foreground">
-        <span>
-          {{
-            t("visibleSchemas.selectedCount", {
-              selected: visibleSchemaSelectedCount,
-              total: visibleSchemaTotalCount,
-            })
-          }}
-        </span>
-        <div class="flex items-center gap-2">
-          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleSchemas" @click="selectAllVisibleSchemas">
-            {{ t("visibleSchemas.selectAll") }}
-          </button>
-          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleSchemas" @click="clearVisibleSchemaSelection">
-            {{ t("visibleSchemas.clear") }}
-          </button>
-          <button class="hover:text-foreground disabled:opacity-50" :disabled="isLoadingVisibleSchemas" @click="showAllVisibleSchemas">
-            {{ t("visibleSchemas.showAll") }}
-          </button>
-        </div>
-      </div>
-      <p v-if="!isLoadingVisibleSchemas && !visibleSchemaError && !visibleSchemaCanSave" class="text-xs text-destructive">
-        {{ t("visibleSchemas.emptySelection") }}
-      </p>
-
-      <div class="h-72 overflow-y-auto rounded-md border bg-background/50 p-1">
-        <div v-if="isLoadingVisibleSchemas" class="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
-          <Loader2 class="h-4 w-4 animate-spin" />
-          {{ t("common.loading") }}
-        </div>
-        <div v-else-if="visibleSchemaError" class="p-3 text-sm text-destructive">
-          {{ t("visibleSchemas.loadFailed", { message: visibleSchemaError }) }}
-        </div>
-        <div v-else-if="!filteredVisibleSchemaNames.length" class="p-3 text-sm text-muted-foreground">
-          {{ t("grid.noSearchResults") }}
-        </div>
-        <template v-else>
-          <button
-            v-for="schema in filteredVisibleSchemaNames"
-            :key="schema"
-            type="button"
-            class="flex h-8 w-full min-w-0 items-center gap-2 rounded-sm px-2 text-left text-sm hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
-            @click="toggleVisibleSchema(schema)"
-          >
-            <CheckSquare v-if="visibleSchemaSelection.has(schema)" class="h-4 w-4 shrink-0 text-primary" />
-            <Square v-else class="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span class="truncate">{{ schema }}</span>
-          </button>
-        </template>
-      </div>
-
-      <DialogFooter>
-        <Button variant="outline" @click="showVisibleSchemasDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="isLoadingVisibleSchemas || !!visibleSchemaError || !visibleSchemaCanSave" @click="saveVisibleSchemaSelection">
-          {{ t("visibleSchemas.save") }}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+  <VisibleSchemasDialog
+    v-model:open="showVisibleSchemasDialog"
+    draft-mode
+    :connection-id="''"
+    :connection-name="form.name || selectedProfile().label"
+    :database="visibleSchemasDatabaseKey"
+    :draft-schema-names="visibleSchemaNames"
+    :draft-initial-selection="visibleSchemaInitialSelection"
+    :draft-loading="isLoadingVisibleSchemas"
+    :draft-error="visibleSchemaError"
+    @draft:save="handleDraftSchemasSave"
+    @draft:show-all="handleDraftSchemasShowAll"
+  />
 </template>
