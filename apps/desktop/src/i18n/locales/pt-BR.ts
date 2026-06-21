@@ -1154,6 +1154,18 @@ export default {
     emptySelection: "Selecione pelo menos um banco de dados, ou use Mostrar todos para limpar o filtro.",
     loadFailed: "Falha ao carregar bancos de dados: {message}",
   },
+  visibleSchemas: {
+    title: "Filtro de Schema",
+    description: 'Escolha quais schemas são exibidos em "{connection}".',
+    searchPlaceholder: "Pesquisar schemas...",
+    selectedCount: "{selected}/{total} selecionados",
+    selectAll: "Selecionar todos",
+    clear: "Limpar",
+    showAll: "Mostrar todos",
+    save: "Salvar",
+    emptySelection: "Selecione pelo menos um schema, ou use Mostrar todos para limpar o filtro.",
+    loadFailed: "Falha ao carregar schemas: {message}",
+  },
   tree: {
     savedSql: "Biblioteca SQL",
     defaultDatabase: "Banco padrão",

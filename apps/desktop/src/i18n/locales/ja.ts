@@ -1207,6 +1207,18 @@ export default {
     emptySelection: "少なくとも1つのデータベースを選択するか、すべて表示でフィルターをクリアしてください。",
     loadFailed: "データベースの読み込みに失敗しました: {message}",
   },
+  visibleSchemas: {
+    title: "スキーマフィルター",
+    description: "「{connection}」の下に表示するスキーマを選択してください。",
+    searchPlaceholder: "スキーマを検索...",
+    selectedCount: "{selected}/{total}件選択中",
+    selectAll: "すべて選択",
+    clear: "クリア",
+    showAll: "すべて表示",
+    save: "保存",
+    emptySelection: "少なくとも1つのスキーマを選択するか、すべて表示でフィルターをクリアしてください。",
+    loadFailed: "スキーマの読み込みに失敗しました: {message}",
+  },
   tree: {
     savedSql: "SQLライブラリ",
     userAdmin: "ユーザーと権限",

@@ -1038,6 +1038,18 @@ export default {
     emptySelection: "Selecciona al menos una base de datos, o usa Mostrar todo para quitar el filtro.",
     loadFailed: "No se pudieron cargar las bases de datos: {message}",
   },
+  visibleSchemas: {
+    title: "Filtro de Schema",
+    description: 'Elige qué schemas se muestran bajo "{connection}".',
+    searchPlaceholder: "Buscar schemas...",
+    selectedCount: "{selected}/{total} seleccionados",
+    selectAll: "Seleccionar todo",
+    clear: "Limpiar",
+    showAll: "Mostrar todo",
+    save: "Guardar",
+    emptySelection: "Selecciona al menos un schema, o usa Mostrar todo para quitar el filtro.",
+    loadFailed: "No se pudieron cargar los schemas: {message}",
+  },
   tree: {
     savedSql: "Biblioteca SQL",
     defaultDatabase: "Base predeterminada",

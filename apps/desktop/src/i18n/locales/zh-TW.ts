@@ -1133,6 +1133,18 @@ export default {
     emptySelection: "至少選擇一個資料庫，或使用「顯示全部」清除篩選。",
     loadFailed: "載入資料庫失敗：{message}",
   },
+  visibleSchemas: {
+    title: "Schema 過濾器",
+    description: "選擇「{connection}」下要在側邊欄顯示的 Schema。",
+    searchPlaceholder: "搜尋 Schema……",
+    selectedCount: "已選擇 {selected}/{total}",
+    selectAll: "全選",
+    clear: "清空",
+    showAll: "顯示全部",
+    save: "儲存",
+    emptySelection: "至少選擇一個 Schema，或使用「顯示全部」清除篩選。",
+    loadFailed: "載入 Schema 失敗：{message}",
+  },
   tree: {
     savedSql: "SQL 庫",
     defaultDatabase: "預設庫",

@@ -559,6 +559,7 @@ pub async fn build_create_database_sql(Json(req): Json<BuildCreateDatabaseSqlReq
     Json(dbx_core::db_admin_sql::build_create_database_sql(req.options))
 }
 
+#[cfg(feature = "duckdb-bundled")]
 pub async fn build_duckdb_attach_database_sql(Json(req): Json<BuildDuckDbAttachDatabaseSqlRequest>) -> Json<String> {
     Json(dbx_core::db_admin_sql::build_duckdb_attach_database_sql(req.options))
 }
