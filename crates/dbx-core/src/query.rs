@@ -853,10 +853,23 @@ pub async fn do_execute(
             let bare = *mode == crate::connection::MysqlMode::Bare;
             let max_rows = options.max_rows;
             drop(connections);
+            let mut conn = db::mysql::get_conn_with_health_check(&p).await?;
+            let connection_id = conn.id();
+            if let Some(ref execution_id) = options.execution_id {
+                let kill_opts = conn.opts().clone();
+                state.running_queries.register_interrupt(execution_id, move || {
+                    let kill_opts = kill_opts.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = db::mysql::kill_query_with_opts(kill_opts, connection_id).await {
+                            log::warn!("Failed to cancel MySQL query {connection_id}: {error}");
+                        }
+                    });
+                });
+            }
             wait_for_query_opt(
                 cancel_token,
                 query_timeout,
-                db::mysql::execute_query_with_max_rows(&p, sql, bare, max_rows, mysql_dialect),
+                db::mysql::execute_query_on_conn_with_max_rows(&mut conn, sql, bare, max_rows, mysql_dialect),
             )
             .await
         }
@@ -915,13 +928,17 @@ pub async fn do_execute(
             let database = pool_key.split(':').nth(1).unwrap_or("default").to_string();
             let max_rows = options.max_rows;
             drop(connections);
-            wait_for_query_opt(
+            let result = wait_for_query_opt(
                 cancel_token,
                 query_timeout,
                 db::clickhouse_driver::execute_query_with_max_rows(&client, &database, sql, max_rows),
             )
             .await
-            .map(|result| truncate_result_with_max_rows(result, max_rows))
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
         }
         PoolKind::SqlServer(client) => {
             let client = client.clone();
@@ -953,9 +970,31 @@ pub async fn do_execute(
             let sql = sql.to_string();
             let max_rows = options.max_rows;
             drop(connections);
-            wait_for_query_opt(cancel_token, query_timeout, db::elasticsearch_driver::execute_rest_query(&client, &sql))
-                .await
-                .map(|result| truncate_result_with_max_rows(result, max_rows))
+            let result = wait_for_query_opt(
+                cancel_token,
+                query_timeout,
+                db::elasticsearch_driver::execute_rest_query(&client, &sql),
+            )
+            .await
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
+        }
+        PoolKind::VectorDb(client) => {
+            let client = client.clone();
+            let sql = sql.to_string();
+            let max_rows = options.max_rows;
+            drop(connections);
+            let result =
+                wait_for_query_opt(cancel_token, query_timeout, db::vector_driver::execute_rest_query(&client, &sql))
+                    .await
+                    .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
         }
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
         PoolKind::MongoDb(_) => Err("Use MongoDB-specific commands".to_string()),
@@ -965,9 +1004,17 @@ pub async fn do_execute(
             let database = pool_key.split(':').nth(1).unwrap_or("default").to_string();
             let max_rows = options.max_rows;
             drop(connections);
-            wait_for_query_opt(cancel_token, query_timeout, db::influxdb_driver::execute_query(&client, &database, sql))
-                .await
-                .map(|result| truncate_result_with_max_rows(result, max_rows))
+            let result = wait_for_query_opt(
+                cancel_token,
+                query_timeout,
+                db::influxdb_driver::execute_query(&client, &database, sql),
+            )
+            .await
+            .map(|result| truncate_result_with_max_rows(result, max_rows));
+            if matches!(result.as_ref(), Err(err) if should_discard_pool_after_error(pool_db_type, err)) {
+                state.remove_pool_by_key(pool_key).await;
+            }
+            result
         }
         PoolKind::Agent(client) => {
             let client = client.clone();
@@ -1681,6 +1728,7 @@ pub async fn execute_statements_in_transaction(
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
+            | PoolKind::VectorDb(_)
             | PoolKind::InfluxDb(_)
             | PoolKind::ExternalTabular(_)
             | PoolKind::ExternalDriver { .. } => TxPath::None,
@@ -1689,6 +1737,7 @@ pub async fn execute_statements_in_transaction(
             | PoolKind::Redis(_)
             | PoolKind::MongoDb(_)
             | PoolKind::Elasticsearch(_)
+            | PoolKind::VectorDb(_)
             | PoolKind::InfluxDb(_)
             | PoolKind::ExternalTabular(_)
             | PoolKind::ExternalDriver { .. } => TxPath::None,

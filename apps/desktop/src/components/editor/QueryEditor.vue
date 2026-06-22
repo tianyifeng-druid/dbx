@@ -6,16 +6,20 @@ import type { CompletionContext } from "@codemirror/autocomplete";
 import type { EditorView as EditorViewType } from "@codemirror/view";
 import { search as cmSearch } from "@codemirror/search";
 import EditorSearchPanel from "./EditorSearchPanel.vue";
+import SqlExecutionTargetPicker from "./SqlExecutionTargetPicker.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import { copyToClipboard } from "@/lib/clipboard";
-import { resolveExecutableSql, type SqlExecutionSnapshot } from "@/lib/sqlExecutionTarget";
+import { resolveExecutableSql, type SqlExecutionSnapshot, type SqlExecutionOverride, type SqlExecutionCandidate } from "@/lib/sqlExecutionTarget";
+import { buildExecutionCandidates, hasMultipleExecutionTargets, supportsExecutionTargetPicker } from "@/lib/sqlStatementRanges";
 import { formatSqlText, type SqlFormatDialect } from "@/lib/sqlFormatter";
+import { formatMongoShellText } from "@/lib/mongoFormatter";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/composables/useTheme";
 import { useToast } from "@/composables/useToast";
 import { buildSqlCompletionItemsFromContext, getSqlFunctionSignatureHelp, getSqlCompletionContext, getSqlCompletionResultValidFor, isSqlLikeCompletionStatement, recordCompletionSelection, shouldAutoOpenSqlCompletion, extractCteDefinitions } from "@/lib/sqlCompletion";
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearchCompletion";
+import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongoCompletion";
 import { extractIdentifierAt, isSqlKeyword, matchTable } from "@/lib/sqlNavigation";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sqlDiagnostics";
 import {
@@ -34,6 +38,7 @@ import { clampEditorFontSize, createEditorZoomCommitScheduler, fontSizeFromGestu
 import { normalizeShortcutSettings, shortcutToCodeMirrorKey } from "@/lib/shortcutRegistry";
 import { trimmedSelectionLayer } from "@/lib/codemirrorTrimmedSelectionLayer";
 import { selectionMatchOccurrences } from "@/lib/codemirrorSelectionMatches";
+import { createDbxCodeMirrorSqlDialect } from "@/lib/codemirrorSqlDialect";
 import { isSchemaAware, isSingleDatabase } from "@/lib/databaseFeatureSupport";
 import { qualifiedTableNameAtSqlPosition } from "@/lib/queryCursorTableTarget";
 import * as api from "@/lib/api";
@@ -64,7 +69,7 @@ const emit = defineEmits<{
   selectionChange: [value: string];
   cursorChange: [pos: number];
   formatError: [message: string];
-  execute: [snapshot: SqlExecutionSnapshot];
+  execute: [source: SqlExecutionOverride];
   save: [];
   clickTable: [tableName: string];
   viewTableData: [tableName: string];
@@ -148,6 +153,13 @@ const contextTableName = ref<string | null>(null);
 const hasSelectedSql = computed(() => selectedSql.value.trim().length > 0);
 const canCopySelectedSql = computed(() => selectedSql.value.length > 0);
 const canExecuteContextSql = computed(() => executableSql.value.trim().length > 0);
+
+// Execution target picker state
+const pickerVisible = ref(false);
+const pickerCandidates = ref<SqlExecutionCandidate[]>([]);
+const pickerActiveIndex = ref(0);
+const pickerAnchor = ref<{ left: number; top: number }>();
+
 const executeContextMenuLabel = computed(() => t(hasSelectedSql.value ? "editor.contextMenu.executeSelection" : "editor.contextMenu.executeCurrent"));
 
 interface EditorGestureEvent extends Event {
@@ -182,6 +194,9 @@ let codeMirrorRedo: typeof import("@codemirror/commands").redo | null = null;
 let codeMirrorSelectAll: typeof import("@codemirror/commands").selectAll | null = null;
 let codeMirrorInsertNewlineKeepIndent: typeof import("@codemirror/commands").insertNewlineKeepIndent | null = null;
 let setSqlDiagnosticsEffect: import("@codemirror/state").StateEffectType<SqlSemanticDiagnostic[]> | null = null;
+let setPreviewRangeEffect: import("@codemirror/state").StateEffectType<{ from: number; to: number } | null> | null = null;
+let previewRangeComp: import("@codemirror/state").Compartment | null = null;
+let buildPreviewRangeExtension: (() => import("@codemirror/state").Extension) | null = null;
 let semanticDiagnostics: SqlSemanticDiagnostic[] = [];
 let semanticDiagnosticTimer: ReturnType<typeof setTimeout> | null = null;
 let semanticDiagnosticRunId = 0;
@@ -287,9 +302,81 @@ function handleTab(view: EditorViewType): boolean {
   return true;
 }
 
-function executeCurrentSql() {
-  if (view.value) emit("execute", sqlExecutionSnapshotFromView(view.value));
+function requestExecute() {
+  const currentView = view.value;
+  if (!currentView) return false;
+  const selection = currentView.state.selection.main;
+  if (!selection.empty) {
+    // Has manual selection → execute directly, skip picker.
+    emit("execute", sqlExecutionSnapshotFromView(currentView));
+    return true;
+  }
+  if (!supportsExecutionTargetPicker(props.databaseType)) {
+    emit("execute", sqlExecutionSnapshotFromView(currentView));
+    return true;
+  }
+  // No selection → show the execution target picker.
+  const doc = currentView.state.doc.toString();
+  const cursorPos = selection.head;
+  const candidates = buildExecutionCandidates(doc, cursorPos, props.databaseType);
+  if (candidates.length === 0) return false;
+  if (!settingsStore.editorSettings.showExecutionTargetPicker || !hasMultipleExecutionTargets(doc, props.databaseType)) {
+    const preferredKind = settingsStore.editorSettings.executeMode === "current" ? "cursor" : "all";
+    const candidate = candidates.find((item) => item.kind === preferredKind) ?? candidates[0];
+    emit("execute", candidate.sql);
+    return true;
+  }
+  closePicker();
+  pickerCandidates.value = candidates;
+  pickerActiveIndex.value = 0;
+  pickerAnchor.value = executionPickerAnchor(currentView, cursorPos, candidates.length);
+  pickerVisible.value = true;
+  setPreviewRange({ from: candidates[0].from, to: candidates[0].to });
   return true;
+}
+
+function executionPickerAnchor(currentView: EditorViewType, cursorPos: number, candidateCount: number): { left: number; top: number } | undefined {
+  const cursorRect = currentView.coordsAtPos(cursorPos);
+  const rootRect = editorRef.value?.getBoundingClientRect();
+  if (!cursorRect || !rootRect) return undefined;
+
+  const verticalGap = 8;
+  const pickerHeight = 40 + Math.max(1, candidateCount) * 36;
+  const verticalMargin = 12;
+  const left = rootRect.width / 2;
+  const cursorBottom = cursorRect.bottom - rootRect.top;
+  const maxTop = Math.max(verticalMargin, rootRect.height - pickerHeight - verticalMargin);
+  const top = Math.min(cursorBottom + verticalGap, maxTop);
+
+  return { left, top };
+}
+
+function setPreviewRange(range: { from: number; to: number } | null) {
+  if (!view.value || !setPreviewRangeEffect) return;
+  view.value.dispatch({
+    effects: setPreviewRangeEffect.of(range),
+  });
+}
+
+function onPickerActiveIndexChange(index: number) {
+  pickerActiveIndex.value = index;
+  const candidate = pickerCandidates.value[index];
+  if (candidate) {
+    setPreviewRange({ from: candidate.from, to: candidate.to });
+  }
+}
+
+function onPickerConfirm(candidate: SqlExecutionCandidate) {
+  closePicker();
+  emit("execute", candidate.sql);
+}
+
+function closePicker() {
+  pickerVisible.value = false;
+  pickerAnchor.value = undefined;
+  setPreviewRange(null);
+  // Restore focus to the CodeMirror editor.
+  view.value?.focus();
 }
 
 function syncContextMenuState(currentView: EditorViewType) {
@@ -336,7 +423,7 @@ function clearTableNavigationHoverOnModifierRelease(event: KeyboardEvent) {
 
 function executeFromContextMenu() {
   if (!canExecuteContextSql.value) return;
-  executeCurrentSql();
+  requestExecute();
   focusEditor();
 }
 
@@ -416,7 +503,7 @@ function runKeymapExtension(codeMirrorKeymap: (typeof import("@codemirror/view")
         },
         ...binding(shortcuts.find, openSearch),
         ...binding(shortcuts.replace, openReplace),
-        ...binding(shortcuts.executeSql, executeCurrentSql),
+        ...binding(shortcuts.executeSql, requestExecute),
         ...binding(shortcuts.saveSql, () => {
           emit("save");
           return true;
@@ -829,7 +916,7 @@ async function formatCurrentSql() {
   if (!source.trim()) return;
 
   try {
-    const formatted = await formatSqlText(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
+    const formatted = props.databaseType === "mongodb" ? formatMongoShellText(source, settingsStore.editorSettings.sqlFormatter) : await formatSqlText(source, props.formatDialect ?? props.dialect ?? "generic", settingsStore.editorSettings.sqlFormatter);
     if (view.value !== currentView || currentView.state !== originalState || currentView.state.sliceDoc(from, to) !== source) {
       return;
     }
@@ -904,7 +991,7 @@ function unregisterTableReferenceDropListener() {
 let completionEpoch = 0;
 let completionDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem;
+type QueryCompletionItem = SqlCompletionItem | ElasticsearchCompletionItem | RedisCompletionItem | MongoCompletionItem;
 
 function buildCompletionResult(items: QueryCompletionItem[], from: number, validFor?: RegExp) {
   if (items.length === 0) return null;
@@ -1031,10 +1118,50 @@ async function provideRedisCompletions(currentState: import("@codemirror/state")
   };
 }
 
+async function provideMongoCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
+  if (!props.connectionId) return null;
+  const epoch = ++completionEpoch;
+  const fullDoc = currentState.doc.toString();
+  if (!explicit && !shouldAutoOpenMongoCompletion(fullDoc, position)) return null;
+
+  const completionContext = getMongoCompletionContext(fullDoc, position);
+  let collections: string[] = [];
+  let fields: Awaited<ReturnType<typeof connectionStore.listMongoCompletionFields>> = [];
+
+  if (props.database && completionContext.mode === "collection") {
+    try {
+      collections = await connectionStore.listMongoCompletionCollections(props.connectionId, props.database);
+    } catch {
+      collections = [];
+    }
+  }
+
+  if (props.database && completionContext.mode === "field" && completionContext.collection) {
+    try {
+      fields = await connectionStore.listMongoCompletionFields(props.connectionId, props.database, completionContext.collection);
+    } catch {
+      fields = [];
+    }
+  }
+
+  if (epoch !== completionEpoch) return null;
+
+  const items = buildMongoCompletionItemsFromContext(completionContext, { collections, fields });
+  if (items.length === 0) return null;
+  return {
+    from: completionContext.from,
+    options: items.map((item) => completionOptionForItem(item)),
+    validFor: getMongoCompletionResultValidFor(),
+  };
+}
+
 async function provideSqlCompletions(currentState: import("@codemirror/state").EditorState, position: number, explicit: boolean) {
   if (imeCompositionActive || view.value?.compositionStarted || view.value?.composing) return null;
   if (!props.connectionId) return null;
   const fullDoc = currentState.doc.toString();
+  if (props.databaseType === "mongodb") {
+    return provideMongoCompletions(currentState, position, explicit);
+  }
   if (props.databaseType === "elasticsearch") {
     if (!isSqlLikeCompletionStatement(fullDoc, position)) {
       return provideElasticsearchCompletions(currentState, position, explicit);
@@ -1062,6 +1189,7 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
         snippets: settingsStore.editorSettings.snippets,
         dialect: props.dialect,
         databaseType: props.databaseType,
+        keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       });
       return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
     }
@@ -1079,6 +1207,7 @@ async function provideSqlCompletions(currentState: import("@codemirror/state").E
         snippets: settingsStore.editorSettings.snippets,
         dialect: props.dialect,
         databaseType: props.databaseType,
+        keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
       });
       return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
     }
@@ -1222,6 +1351,7 @@ function buildLocalSqlCompletionResult(completionContext: ReturnType<typeof getS
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
     databaseType: props.databaseType,
+    keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
   });
 
   return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
@@ -1508,6 +1638,7 @@ async function performAsyncCompletionWithResult(epoch: number, completionContext
     snippets: settingsStore.editorSettings.snippets,
     dialect: props.dialect,
     databaseType: props.databaseType,
+    keywordCase: settingsStore.editorSettings.sqlFormatter.keywordCase,
   });
 
   return buildCompletionResult(items, position - completionContext.prefix.length, getSqlCompletionResultValidFor(fullDoc, position));
@@ -1545,7 +1676,7 @@ onMounted(async () => {
   const [
     { EditorView, keymap, rectangularSelection, hoverTooltip, showTooltip, Decoration, tooltips, lineNumbers, highlightActiveLineGutter, highlightSpecialChars, drawSelection, dropCursor, crosshairCursor, ViewPlugin },
     { EditorState, Compartment, Prec, StateEffect, StateField },
-    { sql, MSSQL, MySQL, PostgreSQL, SQLDialect },
+    langSql,
     { autocompletion, startCompletion, acceptCompletion, closeBrackets, closeBracketsKeymap, snippetCompletion, completionStatus, completionKeymap },
     { copyLineDown, copyLineUp, deleteLine, indentLess, indentMore, insertNewlineKeepIndent, moveLineDown, moveLineUp, redo, selectAll, undo, history, defaultKeymap, historyKeymap },
     { bracketMatching, foldGutter, indentOnInput, syntaxHighlighting, defaultHighlightStyle, foldKeymap },
@@ -1561,6 +1692,7 @@ onMounted(async () => {
   runKeymapComp = new Compartment();
   completionComp = new Compartment();
   diagnosticComp = new Compartment();
+  previewRangeComp = new Compartment();
   setSqlDiagnosticsEffect = StateEffect.define<SqlSemanticDiagnostic[]>();
   codeMirrorCompletionStatus = completionStatus;
   codeMirrorAcceptCompletion = acceptCompletion;
@@ -1620,6 +1752,28 @@ onMounted(async () => {
     return [field, diagnosticTheme];
   };
 
+  setPreviewRangeEffect = StateEffect.define<{ from: number; to: number } | null>();
+  buildPreviewRangeExtension = () => {
+    const effectType = setPreviewRangeEffect!;
+    const field = StateField.define({
+      create() {
+        return Decoration.none;
+      },
+      update(decorations, transaction) {
+        for (const effect of transaction.effects) {
+          if (effect.is(effectType)) {
+            const range = effect.value;
+            if (!range) return Decoration.none;
+            return Decoration.set([Decoration.mark({ class: "cm-db-execution-preview" }).range(range.from, range.to)]);
+          }
+        }
+        return decorations;
+      },
+      provide: (f) => EditorView.decorations.from(f),
+    });
+    return field;
+  };
+
   buildSqlSignatureExtension = () =>
     showTooltip.compute(["doc", "selection"], (currentState) => {
       const signature = getSqlFunctionSignatureHelp(currentState.doc.toString(), currentState.selection.main.head);
@@ -1638,22 +1792,7 @@ onMounted(async () => {
       override: [async (context: CompletionContext) => provideSqlCompletions(context.state, context.pos, context.explicit)],
     });
 
-  const baseDialect = props.dialect === "postgres" ? PostgreSQL : props.dialect === "sqlserver" ? MSSQL : MySQL;
-  const extraKeywords = "PIVOT UNPIVOT EXCLUDE REPLACE QUALIFY ASOF POSITIONAL ANTI SEMI SAMPLE TABLESAMPLE STRUCT MAP LIST ARRAY LAMBDA UNNEST LATERAL FILTER RECURSIVE SUMMARIZE PRAGMA READ_CSV READ_PARQUET READ_JSON DESCRIBE SHOW COPY EXPORT IMPORT";
-
-  // PL/pgSQL extension: add procedural language keywords and built-in variables for PostgreSQL function/procedure bodies
-  const isPostgres = props.dialect === "postgres";
-  const plpgsqlKeywords = isPostgres ? "PERFORM" : "";
-  const plpgsqlTypes = isPostgres ? " RECORD JSON JSONB" : "";
-  const plpgsqlBuiltin = isPostgres ? "SQLERRM TG_NAME TG_WHEN TG_LEVEL TG_OP TG_RELID TG_RELNAME TG_TABLE_NAME TG_TABLE_SCHEMA TG_NARGS TG_ARGV" : "";
-
-  const dialect = SQLDialect.define({
-    ...baseDialect.spec,
-    keywords: [baseDialect.spec.keywords || "", extraKeywords, plpgsqlKeywords].filter(Boolean).join(" "),
-    types: [baseDialect.spec.types || "", plpgsqlTypes].filter(Boolean).join(" ") || undefined,
-    builtin: [baseDialect.spec.builtin || "", plpgsqlBuiltin].filter(Boolean).join(" ") || undefined,
-    doubleDollarQuotedStrings: false,
-  });
+  const dialect = createDbxCodeMirrorSqlDialect(langSql, props.dialect);
 
   const initialSettings = settingsStore.editorSettings;
   const theme = await loadEditorTheme(initialSettings.theme, editorThemeAppearance(), getCurrentCustomThemeColors());
@@ -1725,7 +1864,7 @@ onMounted(async () => {
       crosshairCursor(),
       activeLineHighlighter,
       keymap.of([...defaultKeymap, ...searchKeymap, ...historyKeymap, ...foldKeymap, ...completionKeymap]),
-      sql({ dialect }),
+      langSql.sql({ dialect }),
       tooltips({ parent: document.body }),
       completionComp.of(buildSqlCompletionExtension()),
       sqlCompletionTheme(EditorView),
@@ -1735,6 +1874,7 @@ onMounted(async () => {
       hoverTooltip((currentView, pos) => resolveSqlHoverTooltip(currentView, pos)),
       buildSqlSignatureExtension(),
       diagnosticComp.of(buildSqlDiagnosticExtension()),
+      previewRangeComp.of(buildPreviewRangeExtension()),
       Prec.highest(
         keymap.of([
           ...closeBracketsKeymap,
@@ -2231,7 +2371,7 @@ function scrollCursorIntoView() {
   });
 }
 
-defineExpose({ openSearch, openReplace, scrollCursorIntoView });
+defineExpose({ openSearch, openReplace, scrollCursorIntoView, requestExecute });
 </script>
 
 <template>
@@ -2250,6 +2390,7 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView });
       />
     </CustomContextMenu>
     <EditorSearchPanel ref="searchPanelRef" :view="view" />
+    <SqlExecutionTargetPicker v-if="pickerVisible" :candidates="pickerCandidates" :active-index="pickerActiveIndex" :anchor="pickerAnchor" @update:active-index="onPickerActiveIndexChange" @confirm="onPickerConfirm" @cancel="closePicker" />
   </div>
 </template>
 
@@ -2257,6 +2398,10 @@ defineExpose({ openSearch, openReplace, scrollCursorIntoView });
 .query-editor--table-navigation-hover :deep(.cm-content),
 .query-editor--table-navigation-hover :deep(.cm-line) {
   cursor: pointer;
+}
+
+:deep(.cm-db-execution-preview) {
+  background: var(--dbx-editor-selection-background, rgba(59, 130, 246, 0.35));
 }
 
 :deep(.cm-foldMarker-svg) {

@@ -50,6 +50,7 @@ import { supportsDatabaseUserAdmin } from "@/lib/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/tableMetadataCapabilities";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/sqlServerLinkedServers";
+import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongoCompletion";
 
 const PINNED_TREE_NODES_STORAGE_KEY = "dbx-pinned-tree-nodes";
 const ACTIVE_CONNECTION_STORAGE_KEY = "dbx-active-connection";
@@ -155,6 +156,8 @@ export const useConnectionStore = defineStore("connection", () => {
   const completionDatabasesCache = ref<Record<string, string[]>>({});
   const elasticsearchCompletionIndicesCache = ref<Record<string, string[]>>({});
   const redisCompletionKeysCache = ref<Record<string, string[]>>({});
+  const mongoCompletionCollectionsCache = ref<Record<string, string[]>>({});
+  const mongoCompletionFieldsCache = ref<Record<string, MongoCompletionField[]>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
   const sidebarSearchQuery = ref("");
   const completionTableIndex = new Map<string, { touched: number; tables: SqlCompletionTable[] }>();
@@ -293,6 +296,8 @@ export const useConnectionStore = defineStore("connection", () => {
       mongodb: "MongoDB",
       oracle: "Oracle",
       elasticsearch: "Elasticsearch",
+      qdrant: "Qdrant",
+      milvus: "Milvus",
       doris: "Doris",
       starrocks: "StarRocks",
       manticoresearch: "Manticore Search",
@@ -456,7 +461,7 @@ export const useConnectionStore = defineStore("connection", () => {
   }
 
   function objectGroupCacheKey(node: TreeNode): string {
-    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v2");
+    return schemaCacheKey(node.connectionId || "", node.database || "", node.schema || "", node.type, "objects-v3");
   }
 
   function buildLoadMoreNode(parent: TreeNode, offset: number, pageSize: number): TreeNode {
@@ -656,6 +661,12 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const key of Object.keys(redisCompletionKeysCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete redisCompletionKeysCache.value[key];
     }
+    for (const key of Object.keys(mongoCompletionCollectionsCache.value)) {
+      if (key === exactCacheKey || key.startsWith(cachePrefix)) delete mongoCompletionCollectionsCache.value[key];
+    }
+    for (const key of Object.keys(mongoCompletionFieldsCache.value)) {
+      if (key === exactCacheKey || key.startsWith(cachePrefix)) delete mongoCompletionFieldsCache.value[key];
+    }
     for (const key of completionTableIndex.keys()) {
       if (key.startsWith(cachePrefix)) completionTableIndex.delete(key);
     }
@@ -843,6 +854,8 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadMongoDatabases(connectionId);
     } else if (config.db_type === "elasticsearch") {
       await loadElasticsearchIndices(connectionId);
+    } else if (config.db_type === "qdrant" || config.db_type === "milvus") {
+      await loadVectorCollections(connectionId);
     } else if (config.db_type === "mq") {
       await loadMqTenants(connectionId, { force: true });
     } else {
@@ -1253,9 +1266,41 @@ export const useConnectionStore = defineStore("connection", () => {
         withSavedSqlRoot(
           connectionId,
           sortSidebarNames(indices).map((index) => ({
-            id: `${connectionId}:__es_index:${index}`,
+            id: `${connectionId}:__collection:${index}`,
             label: index,
             type: "elasticsearch-index" as const,
+            connectionId,
+            database: "default",
+            isExpanded: false,
+          })),
+          node,
+        ),
+      );
+      node.isExpanded = true;
+    } catch (e) {
+      recordMetadataLoadError(connectionId, e);
+      throw e;
+    } finally {
+      node.isLoading = false;
+    }
+  }
+
+  async function loadVectorCollections(connectionId: string) {
+    const node = findNode(treeNodes.value, connectionId);
+    if (!node) return;
+
+    node.isLoading = true;
+    try {
+      await ensureConnected(connectionId);
+      const collections = await api.vectorListCollections(connectionId);
+      setChildren(
+        node,
+        withSavedSqlRoot(
+          connectionId,
+          sortSidebarNames(collections).map((collection) => ({
+            id: `${connectionId}:__vector_collection:${collection}`,
+            label: collection,
+            type: "vector-collection" as const,
             connectionId,
             database: "default",
             isExpanded: false,
@@ -1348,7 +1393,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureConnected(connectionId);
       if (useCachedChildren(node, options)) return;
       const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-      const cacheKey = schemaCacheKey(connectionId, database, simpleObjectDisplay ? "sqlserver-objects-simple-v2" : "sqlserver-objects-grouped-v2");
+      const cacheKey = schemaCacheKey(connectionId, database, simpleObjectDisplay ? "sqlserver-objects-simple-v3" : "sqlserver-objects-grouped-v3");
       if (!options?.force) {
         const cached = await loadPersistedTreeChildren(node, cacheKey);
         if (cached.hit) {
@@ -1494,7 +1539,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureConnected(connectionId);
       if (useCachedChildren(node, options)) return;
       const simpleObjectDisplay = useSettingsStore().editorSettings.sidebarObjectDisplay === "simple";
-      const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v2" : "objects-grouped-v2");
+      const cacheKey = schemaCacheKey(connectionId, database, schema || "", simpleObjectDisplay ? "objects-simple-v3" : "objects-grouped-v3");
       if (!options?.force) {
         const cached = await loadPersistedTreeChildren(node, cacheKey);
         if (cached.hit) {
@@ -1666,7 +1711,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
     const config = getConfig(connectionId);
     const metadataCapabilities = getTableMetadataCapabilities(effectiveDatabaseTypeForConnection(config));
-    if (node.type === "table" && !parseSqlServerLinkedSchema(schema)) {
+    if ((node.type === "table" || node.type === "mongo-collection") && !parseSqlServerLinkedSchema(schema)) {
       if (metadataCapabilities.indexes) {
         children.push({
           id: `${parentId}:__indexes`,
@@ -1680,6 +1725,8 @@ export const useConnectionStore = defineStore("connection", () => {
           children: [],
         });
       }
+    }
+    if (node.type === "table" && !parseSqlServerLinkedSchema(schema)) {
       if (metadataCapabilities.foreignKeys) {
         children.push({
           id: `${parentId}:__fkeys`,
@@ -1719,6 +1766,33 @@ export const useConnectionStore = defineStore("connection", () => {
 
     node.isLoading = true;
     try {
+      if (effectiveDatabaseTypeForConnection(getConfig(connectionId)) === "mongodb") {
+        const fields = await listMongoCompletionFields(connectionId, database, table);
+        setChildren(
+          node,
+          fields.map((field) => {
+            const column = {
+              name: field.name,
+              data_type: field.type || "unknown",
+              is_nullable: true,
+              column_default: null,
+              is_primary_key: field.name === "_id",
+              extra: "sampled",
+            };
+            return {
+              id: `${parentId}:${field.name}`,
+              label: `${field.name} (${column.data_type})`,
+              type: "column" as const,
+              connectionId,
+              database,
+              tableName: table,
+              meta: column,
+            };
+          }),
+        );
+        node.isExpanded = true;
+        return;
+      }
       const querySchema = metadataQuerySchema(connectionId, database, schema);
       const columns = await api.getColumns(connectionId, database, querySchema, table);
       setChildren(
@@ -1877,6 +1951,8 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadMongoDatabases(node.connectionId);
       } else if (config?.db_type === "elasticsearch") {
         await loadElasticsearchIndices(node.connectionId);
+      } else if (config?.db_type === "qdrant" || config?.db_type === "milvus") {
+        await loadVectorCollections(node.connectionId);
       } else if (config?.db_type === "mq") {
         await loadMqTenants(node.connectionId, options);
       } else {
@@ -1884,6 +1960,8 @@ export const useConnectionStore = defineStore("connection", () => {
       }
     } else if (node.type === "mongo-db" && node.connectionId && node.database) {
       await loadMongoCollections(node.connectionId, node.database);
+    } else if (node.type === "mongo-collection" && node.connectionId && node.database) {
+      await loadTableGroups(node.connectionId, node.database, node.label, node.schema, node.id);
     } else if (node.type === "database" && node.connectionId && hasTreeNodeDatabaseContext(node)) {
       const config = getConfig(node.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(config);
@@ -2253,6 +2331,35 @@ export const useConnectionStore = defineStore("connection", () => {
       redisCompletionKeysCache.value[cacheKey] = keys;
       evictOldestCacheEntries(redisCompletionKeysCache.value, COMPLETION_CACHE_MAX);
       return keys;
+    });
+  }
+
+  async function listMongoCompletionCollections(connectionId: string, database: string): Promise<string[]> {
+    if (!database) return [];
+    const cacheKey = `${connectionId}:${database}`;
+    const cached = mongoCompletionCollectionsCache.value[cacheKey];
+    if (cached) return cached;
+    return withCompletionInFlight(`${cacheKey}:mongo-collections`, async () => {
+      await ensureConnected(connectionId);
+      const collections = sortSidebarNames(await api.mongoListCollections(connectionId, database));
+      mongoCompletionCollectionsCache.value[cacheKey] = collections;
+      evictOldestCacheEntries(mongoCompletionCollectionsCache.value, COMPLETION_CACHE_MAX);
+      return collections;
+    });
+  }
+
+  async function listMongoCompletionFields(connectionId: string, database: string, collection: string): Promise<MongoCompletionField[]> {
+    if (!database || !collection) return [];
+    const cacheKey = `${connectionId}:${database}:${collection}`;
+    const cached = mongoCompletionFieldsCache.value[cacheKey];
+    if (cached) return cached;
+    return withCompletionInFlight(`${cacheKey}:mongo-fields`, async () => {
+      await ensureConnected(connectionId);
+      const result = await api.mongoFindDocuments(connectionId, database, collection, 0, 20, "{}");
+      const fields = inferMongoCompletionFields(result.documents ?? []);
+      mongoCompletionFieldsCache.value[cacheKey] = fields;
+      evictOldestCacheEntries(mongoCompletionFieldsCache.value, COMPLETION_CACHE_MAX);
+      return fields;
     });
   }
 
@@ -3024,6 +3131,7 @@ export const useConnectionStore = defineStore("connection", () => {
     updateRedisDbKeyStats,
     loadMongoDatabases,
     loadElasticsearchIndices,
+    loadVectorCollections,
     loadMongoCollections,
     loadSchemas,
     loadSqlServerDatabaseObjects,
@@ -3058,6 +3166,8 @@ export const useConnectionStore = defineStore("connection", () => {
     refreshCompletionDatabases,
     listElasticsearchCompletionIndices,
     listRedisCompletionKeys,
+    listMongoCompletionCollections,
+    listMongoCompletionFields,
     invalidateCompletionCache,
     exportConnectionsToFile,
     readImportFile,

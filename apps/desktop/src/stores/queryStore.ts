@@ -15,11 +15,13 @@ import {
   mongoDocumentsToQueryResult,
   mongoIndexesToQueryResult,
   mongoWriteToQueryResult,
+  mongoUseToQueryResult,
   parseMongoAggregateCommand,
   parseMongoCountDocumentsCommand,
   parseMongoFindCommand,
   parseMongoGetIndexesCommand,
   parseMongoWriteCommand,
+  parseMongoUseCommand,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongoShellCommand";
 import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
@@ -38,6 +40,7 @@ import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryRe
 import * as api from "@/lib/api";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import type { SavedSqlFile } from "@/types/database";
 
 const STORAGE_KEY = "dbx-open-tabs";
@@ -942,11 +945,30 @@ export const useQueryStore = defineStore("query", () => {
     tab.resultSortedSql = undefined;
     clearExplain(tab);
     tab.tableMeta = undefined;
+
+    // Sync connection change back to the saved SQL file if this tab is linked
+    if (tab.savedSqlId) {
+      const savedSqlStore = useSavedSqlStore();
+      const existing = savedSqlStore.getFile(tab.savedSqlId);
+      if (existing) {
+        void savedSqlStore.saveFile({
+          id: existing.id,
+          connectionId,
+          name: existing.name,
+          database,
+          schema: existing.schema,
+          sql: existing.sql,
+        });
+      }
+    }
   }
 
   function setTableMeta(id: string, meta: NonNullable<QueryTab["tableMeta"]>) {
     const tab = tabs.value.find((t) => t.id === id);
-    if (tab) tab.tableMeta = meta;
+    if (tab) {
+      tab.tableMeta = meta;
+      tab.tableMetaUpdatedAt = Date.now();
+    }
   }
 
   function setObjectSource(id: string, objectSource: NonNullable<QueryTab["objectSource"]>) {
@@ -1265,13 +1287,17 @@ export const useQueryStore = defineStore("query", () => {
     let useAgentResultSession = false;
     try {
       const connStore = useConnectionStore();
+      console.info("[DBX][executeTabSql:ensure-connected:start]", { traceId, elapsed: elapsed() });
       await connStore.ensureConnected(tab.connectionId);
+      console.info("[DBX][executeTabSql:ensure-connected:done]", { traceId, elapsed: elapsed() });
       const conn = connStore.getConfig(tab.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const settingsStore = useSettingsStore();
+      console.info("[DBX][executeTabSql:previous-session-close:start]", { traceId, elapsed: elapsed() });
       await previousResultSessionClose;
+      console.info("[DBX][executeTabSql:previous-session-close:done]", { traceId, elapsed: elapsed() });
 
       // Redis command execution — split multi-line input into individual commands
       if (conn?.db_type === "redis") {
@@ -1514,6 +1540,32 @@ export const useQueryStore = defineStore("query", () => {
         return;
       }
 
+      const mongoUse = conn?.db_type === "mongodb" ? parseMongoUseCommand(sql) : null;
+      if (mongoUse) {
+        console.info("[DBX][executeTabSql:mongo-use:start]", { traceId, database: mongoUse.database });
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.executionId === executionId) {
+          current.database = mongoUse.database;
+          current.results = undefined;
+          current.activeResultIndex = undefined;
+          current.result = markQueryResultRowsRaw(mongoUseToQueryResult(mongoUse.database, performance.now() - startedAt));
+          touchResult(current);
+          current.queryAnalysis = undefined;
+          current.querySourceColumns = undefined;
+          current.queryEditabilityReason = undefined;
+          current.tableMeta = undefined;
+          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultSortedSql = options?.resultSortedSql;
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+        }
+        console.info("[DBX][executeTabSql:mongo-use:done]", {
+          traceId,
+          database: mongoUse.database,
+          elapsed: elapsed(),
+        });
+        return;
+      }
+
       console.info("[DBX][executeTabSql:execute-multi:start]", { traceId, elapsed: elapsed() });
       const clientSessionId = tab.mode === "query" ? tab.id : undefined;
       const executionOptions = {
@@ -1530,6 +1582,12 @@ export const useQueryStore = defineStore("query", () => {
         timeoutSecs: queryTimeoutSecs,
       };
       const executionSchema = connectionUsesSchemaExecutionContext(conn) ? tab.schema || tab.database : tab.mode === "data" || connectionUsesDatabaseObjectTreeMode(conn) ? undefined : tab.schema;
+      console.info("[DBX][executeTabSql:execute-multi:invoke]", {
+        traceId,
+        elapsed: elapsed(),
+        executionSchema,
+        optionKeys: Object.keys(executionOptions),
+      });
       const executionPromise = api.executeMulti(tab.connectionId, tab.database, sqlToExecute, executionSchema, executionId, executionOptions);
       const frontendTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
       const results = markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, queryTimeoutSecs === 0 ? 0 : frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs })));
@@ -1928,7 +1986,7 @@ export const useQueryStore = defineStore("query", () => {
     });
   }
 
-  async function fetchTabResultForExport(id: string): Promise<QueryResult | undefined> {
+  async function fetchTabResultForExport(id: string, onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void): Promise<QueryResult | undefined> {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab?.result) return undefined;
 
@@ -1939,6 +1997,9 @@ export const useQueryStore = defineStore("query", () => {
       const tableMeta = tableMetaForDataTab(tab);
       if (!tableMeta?.tableName) return tab.result;
 
+      // Use the already-computed total row count as a progress estimate so the
+      // export dialog shows a moving bar instead of a stuck 0 while paginating.
+      const totalRows = typeof tab.resultTotalRowCount === "number" ? tab.resultTotalRowCount : null;
       const pageLimit = TABLE_DATA_EXPORT_PAGE_SIZE;
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const primaryKeys = tab.tableMeta ? editablePrimaryKeys(effectiveDbType, tab.tableMeta.columns, tab.tableMeta.tableType) : tableMeta.primaryKeys;
@@ -1974,6 +2035,7 @@ export const useQueryStore = defineStore("query", () => {
         if (columns.length === 0) columns = result.columns;
         rows.push(...result.rows);
         executionTimeMs += result.execution_time_ms ?? 0;
+        onProgress?.({ rowsExported: rows.length, totalRows });
         if (result.rows.length < pageLimit) break;
         offset += result.rows.length;
       }
@@ -2000,6 +2062,9 @@ export const useQueryStore = defineStore("query", () => {
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
     const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
     const queryBaseSql = tab.resultBaseSql ?? sql;
+    // Use the already-computed total row count as a progress estimate so the
+    // export dialog shows a moving bar instead of a stuck 0 while paginating.
+    const totalRows = typeof tab.resultTotalRowCount === "number" ? tab.resultTotalRowCount : null;
     const pageLimit = Math.max(tab.resultPageLimit ?? 0, TABLE_DATA_EXPORT_PAGE_SIZE);
     const rows: QueryResult["rows"] = [];
     let columns: string[] = [];
@@ -2033,6 +2098,7 @@ export const useQueryStore = defineStore("query", () => {
         if (columns.length === 0) columns = result.columns;
         rows.push(...result.rows);
         executionTimeMs += result.execution_time_ms ?? 0;
+        onProgress?.({ rowsExported: rows.length, totalRows });
         sessionId = result.session_id ?? undefined;
         const shouldFetchNextPage = plan.useAgentResultSession ? result.has_more === true : result.rows.length >= plan.pageLimit;
         if (!shouldFetchNextPage) break;

@@ -26,6 +26,9 @@ jobs:
           set -euo pipefail
           git remote add cnb "https://cnb:${CNB_TOKEN}@cnb.cool/dbxio.com/dbx.git"
           git push cnb --all --force
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push cnb ":refs/tags/${GITHUB_REF_NAME}" || true
+          fi
           git push cnb --tags --force
 
   sync-atomgit:
@@ -44,6 +47,9 @@ jobs:
           set -euo pipefail
           git remote add atomgit "https://t8y2:${ATOMGIT_TOKEN}@atomgit.com/t8y2/dbx.git"
           git push atomgit --all --force
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push atomgit ":refs/tags/${GITHUB_REF_NAME}" || true
+          fi
           git push atomgit --tags --force
 
   sync-gitee:
@@ -62,4 +68,7 @@ jobs:
           set -euo pipefail
           git remote add gitee "https://codetty:${GITEE_TOKEN}@gitee.com/codetty/dbx.git"
           git push gitee --all --force
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push gitee ":refs/tags/${GITHUB_REF_NAME}" || true
+          fi
           git push gitee --tags --force

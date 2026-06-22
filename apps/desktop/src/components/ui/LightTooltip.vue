@@ -28,6 +28,8 @@ const x = ref(0);
 const y = ref(0);
 let timer: ReturnType<typeof setTimeout> | null = null;
 let closeTimer: ReturnType<typeof setTimeout> | null = null;
+let suppressOpenUntil = 0;
+let openSource: "hover" | "focus" | null = null;
 
 function clearCloseTimer() {
   if (!closeTimer) return;
@@ -75,11 +77,31 @@ function clearTimer() {
   timer = null;
 }
 
-function isTriggerActive(): boolean {
+function isPointerActive(): boolean {
   const el = triggerElement();
   if (!el || !el.isConnected) return false;
+  return el.matches(":hover") || tooltipRef.value?.matches(":hover") || false;
+}
+
+function isFocusActive(): boolean {
+  const el = triggerElement();
   const active = document.activeElement;
-  return el.matches(":hover") || tooltipRef.value?.matches(":hover") || (active instanceof Node && el.contains(active));
+  return !!el && active instanceof Node && el.contains(active);
+}
+
+function hasFocusVisible(): boolean {
+  const el = triggerElement();
+  const root = triggerRef.value;
+  if (!el || !root) return false;
+  try {
+    return el.matches(":focus-visible") || !!root.querySelector(":focus-visible");
+  } catch {
+    return false;
+  }
+}
+
+function isOpenSourceActive(): boolean {
+  return openSource === "focus" ? isFocusActive() : isPointerActive();
 }
 
 function isDisabled(): boolean {
@@ -116,11 +138,17 @@ function close() {
   clearTimer();
   clearCloseTimer();
   show.value = false;
+  openSource = null;
   removeGlobalListeners();
 }
 
+function suppressForContextMenu() {
+  suppressOpenUntil = Date.now() + 250;
+  close();
+}
+
 function closeIfTriggerInactive() {
-  if (isTriggerActive()) {
+  if (isOpenSourceActive()) {
     clearCloseTimer();
   } else {
     scheduleClose();
@@ -129,13 +157,13 @@ function closeIfTriggerInactive() {
 
 function scheduleClose() {
   if (props.closeDelay <= 0) {
-    if (!isTriggerActive()) close();
+    if (!isOpenSourceActive()) close();
     return;
   }
   if (closeTimer) return;
   closeTimer = setTimeout(() => {
     closeTimer = null;
-    if (!isTriggerActive()) close();
+    if (!isOpenSourceActive()) close();
   }, props.closeDelay);
 }
 
@@ -167,26 +195,32 @@ function removeGlobalListeners() {
 const slots = defineSlots<{ default(): any; content?(): any }>();
 const hasContent = computed(() => !!props.text || !!slots.content);
 
-function open() {
+function open(source: "hover" | "focus") {
+  if (Date.now() < suppressOpenUntil) return;
   if (isDisabled() || !hasContent.value) return;
-  if (!isTriggerActive()) return;
+  if (source === "focus" ? !hasFocusVisible() : !isPointerActive()) return;
   updatePosition();
+  openSource = source;
   show.value = true;
   addGlobalListeners();
 }
 
-function scheduleOpen() {
+function scheduleOpen(source: "hover" | "focus" = "hover") {
+  if (Date.now() < suppressOpenUntil) return;
   if (isDisabled() || !hasContent.value) return;
   clearTimer();
-  timer = setTimeout(open, props.delay);
+  timer = setTimeout(() => open(source), props.delay);
 }
 
 function scheduleFocusOpen() {
   if (!props.openOnFocus) return;
-  scheduleOpen();
+  if (!hasFocusVisible()) return;
+  scheduleOpen("focus");
 }
 
-onBeforeUnmount(close);
+onBeforeUnmount(() => {
+  close();
+});
 
 watch(
   () => [props.disabled, props.text] as const,
@@ -198,7 +232,7 @@ watch(
 </script>
 
 <template>
-  <span ref="triggerRef" class="contents" @mouseenter="scheduleOpen" @mouseleave="scheduleClose" @focusin="scheduleFocusOpen" @focusout="close">
+  <span ref="triggerRef" class="contents" @mouseenter="() => scheduleOpen('hover')" @mouseleave="scheduleClose" @focusin="scheduleFocusOpen" @focusout="close" @contextmenu.capture="suppressForContextMenu">
     <slot />
   </span>
   <Teleport to="body">

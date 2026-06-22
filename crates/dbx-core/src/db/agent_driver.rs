@@ -472,28 +472,44 @@ impl AgentDriverClient {
         self.call_method(AgentMethod::Disconnect, serde_json::json!({})).await
     }
 
-    pub async fn list_databases<T: DeserializeOwned + Send + 'static>(&mut self) -> Result<T, String> {
-        self.call_method(AgentMethod::ListDatabases, serde_json::json!({})).await
+    pub async fn list_databases<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(AgentMethod::ListDatabases, serde_json::json!({}), timeout_duration).await
     }
 
-    pub async fn list_schemas<T: DeserializeOwned + Send + 'static>(&mut self, database: &str) -> Result<T, String> {
-        self.call_method(AgentMethod::ListSchemas, serde_json::json!({ "database": database })).await
+    pub async fn list_schemas<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+        timeout_duration: Option<Duration>,
+    ) -> Result<T, String> {
+        self.call_method_with_timeout(
+            AgentMethod::ListSchemas,
+            serde_json::json!({ "database": database }),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn list_tables<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: &str,
         schema: &str,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method(AgentMethod::ListTables, agent_schema_params(database, schema)).await
+        self.call_method_with_timeout(AgentMethod::ListTables, agent_schema_params(database, schema), timeout_duration)
+            .await
     }
 
     pub async fn list_objects<T: DeserializeOwned + Send + 'static>(
         &mut self,
         database: &str,
         schema: &str,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method(AgentMethod::ListObjects, agent_schema_params(database, schema)).await
+        self.call_method_with_timeout(AgentMethod::ListObjects, agent_schema_params(database, schema), timeout_duration)
+            .await
     }
 
     pub async fn get_object_source<T: DeserializeOwned + Send + 'static, K: Serialize>(
@@ -502,9 +518,14 @@ impl AgentDriverClient {
         schema: &str,
         name: &str,
         object_type: &K,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method(AgentMethod::GetObjectSource, agent_object_source_params(database, schema, name, object_type))
-            .await
+        self.call_method_with_timeout(
+            AgentMethod::GetObjectSource,
+            agent_object_source_params(database, schema, name, object_type),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn get_columns<T: DeserializeOwned + Send + 'static>(
@@ -512,8 +533,14 @@ impl AgentDriverClient {
         database: &str,
         schema: &str,
         table: &str,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method(AgentMethod::GetColumns, agent_schema_table_params(database, schema, table)).await
+        self.call_method_with_timeout(
+            AgentMethod::GetColumns,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn list_indexes<T: DeserializeOwned + Send + 'static>(
@@ -521,8 +548,14 @@ impl AgentDriverClient {
         database: &str,
         schema: &str,
         table: &str,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method(AgentMethod::ListIndexes, agent_schema_table_params(database, schema, table)).await
+        self.call_method_with_timeout(
+            AgentMethod::ListIndexes,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn list_foreign_keys<T: DeserializeOwned + Send + 'static>(
@@ -530,8 +563,14 @@ impl AgentDriverClient {
         database: &str,
         schema: &str,
         table: &str,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method(AgentMethod::ListForeignKeys, agent_schema_table_params(database, schema, table)).await
+        self.call_method_with_timeout(
+            AgentMethod::ListForeignKeys,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn list_triggers<T: DeserializeOwned + Send + 'static>(
@@ -539,8 +578,14 @@ impl AgentDriverClient {
         database: &str,
         schema: &str,
         table: &str,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method(AgentMethod::ListTriggers, agent_schema_table_params(database, schema, table)).await
+        self.call_method_with_timeout(
+            AgentMethod::ListTriggers,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn get_table_ddl<T: DeserializeOwned + Send + 'static>(
@@ -548,8 +593,14 @@ impl AgentDriverClient {
         database: &str,
         schema: &str,
         table: &str,
+        timeout_duration: Option<Duration>,
     ) -> Result<T, String> {
-        self.call_method(AgentMethod::GetTableDdl, agent_schema_table_params(database, schema, table)).await
+        self.call_method_with_timeout(
+            AgentMethod::GetTableDdl,
+            agent_schema_table_params(database, schema, table),
+            timeout_duration,
+        )
+        .await
     }
 
     pub async fn execute_query<T: DeserializeOwned + Send + 'static>(&mut self, params: Value) -> Result<T, String> {
@@ -722,8 +773,24 @@ impl AgentDriverClient {
         if let Err(e) = self.child.kill() {
             log::warn!("Failed to kill agent process: {e}");
         }
-        // Reap the child to avoid zombie processes
-        let _ = self.child.wait();
+        // Reap the child to avoid zombie processes.
+        // Use try_wait() with a timeout instead of blocking wait() to avoid
+        // hanging in Drop during async cleanup. Poll up to 100ms for the
+        // process to exit after kill().
+        for _ in 0..10 {
+            match self.child.try_wait() {
+                Ok(Some(_status)) => return,
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(e) => {
+                    log::warn!("Failed to wait for agent process: {e}");
+                    return;
+                }
+            }
+        }
+        // Final blocking wait as a last resort
+        if let Err(e) = self.child.wait() {
+            log::warn!("Final wait failed for agent process: {e}");
+        }
     }
 
     pub fn pid(&self) -> u32 {
@@ -1243,9 +1310,11 @@ mod tests {
             vec!["protocolVersion", "agentProtocolVersion", "capabilities"]
         );
         assert_eq!(
-            string_array(&contract["capabilities"]),
+            string_array(&contract["allCapabilities"]),
             AgentCapability::ALL.iter().map(|method| method.as_str()).collect::<Vec<_>>()
         );
+        assert_eq!(string_array(&contract["capabilities"]), default_sql_capabilities());
+        assert_eq!(string_array(&contract["defaultSqlCapabilities"]), default_sql_capabilities());
         assert_eq!(
             string_array(&contract["commonMethods"]),
             AgentMethod::ALL.iter().map(|method| method.as_str()).collect::<Vec<_>>()
@@ -1297,5 +1366,20 @@ mod tests {
 
     fn string_array(value: &serde_json::Value) -> Vec<&str> {
         value.as_array().unwrap().iter().map(|item| item.as_str().unwrap()).collect()
+    }
+
+    fn default_sql_capabilities() -> Vec<&'static str> {
+        [
+            AgentCapability::Connect,
+            AgentCapability::TestConnection,
+            AgentCapability::Metadata,
+            AgentCapability::Query,
+            AgentCapability::PagedQuery,
+            AgentCapability::Transaction,
+            AgentCapability::Ddl,
+        ]
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect()
     }
 }
