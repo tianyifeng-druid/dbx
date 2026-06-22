@@ -1044,6 +1044,7 @@ export default {
     searchPlaceholder: "Buscar schemas...",
     selectedCount: "{selected}/{total} seleccionados",
     selectAll: "Seleccionar todo",
+    selectFiltered: "Seleccionar resultados de búsqueda",
     clear: "Limpiar",
     showAll: "Mostrar todo",
     save: "Guardar",

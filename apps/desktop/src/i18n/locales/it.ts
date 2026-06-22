@@ -1160,6 +1160,7 @@ export default {
     searchPlaceholder: "Cerca schema...",
     selectedCount: "{selected}/{total} selezionati",
     selectAll: "Seleziona tutto",
+    selectFiltered: "Seleziona risultati ricerca",
     clear: "Cancella",
     showAll: "Mostra tutto",
     save: "Salva",

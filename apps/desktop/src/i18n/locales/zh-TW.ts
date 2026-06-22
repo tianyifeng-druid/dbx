@@ -1139,6 +1139,7 @@ export default {
     searchPlaceholder: "搜尋 Schema……",
     selectedCount: "已選擇 {selected}/{total}",
     selectAll: "全選",
+    selectFiltered: "選取搜尋結果",
     clear: "清空",
     showAll: "顯示全部",
     save: "儲存",

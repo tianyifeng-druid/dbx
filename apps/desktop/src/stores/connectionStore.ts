@@ -28,7 +28,7 @@ import { buildSqlServerDatabaseTreeNodes, SQLSERVER_DEFAULT_SCHEMA } from "@/lib
 import { findDatabaseTreeNode } from "@/lib/treeRefreshTarget";
 import { shouldMarkDisconnected } from "@/lib/connectionHealth";
 import { connectionAttemptTimeoutMessage, connectionAttemptTimeoutMs } from "@/lib/connectionAttemptTimeout";
-import { filterDatabaseNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection, filterSchemaNamesForConnection, normalizeVisibleSchemaSelection } from "@/lib/visibleDatabases";
+import { filterDatabaseNamesForConnection, filterVisibleDatabaseNames, normalizeVisibleDatabaseSelection, filterSchemaNamesForConnection } from "@/lib/visibleDatabases";
 import {
   buildObjectGroupPlaceholderNodes,
   buildGroupedObjectTreeNodes,
@@ -780,7 +780,7 @@ export const useConnectionStore = defineStore("connection", () => {
     const config = getConfig(connectionId);
     if (!config) return;
     const key = database || "";
-    await updateVisibleSchemasConfig(connectionId, key, normalizeVisibleSchemaSelection(schemaNames, schemaNames));
+    await updateVisibleSchemasConfig(connectionId, key, schemaNames);
     await reloadSchemaChildren(connectionId, database);
   }
 
@@ -821,8 +821,8 @@ export const useConnectionStore = defineStore("connection", () => {
     clearLoadedChildrenCache(connectionId);
     clearLoadedChildrenCache(`${connectionId}:${db}`);
     await loadDatabases(connectionId, { force: true });
-    // 保存 schema 过滤后，强制刷新数据库节点的 schema 子节点，
-    // 避免 setChildren 保留旧展开节点的旧 children（旧 schema 列表）
+    // After saving schema filter, force-refresh database node's schema children
+    // to avoid stale children from previously expanded nodes
     if (db) {
       const dbNode = findNode(treeNodes.value, `${connectionId}:${db}`);
       if (dbNode) {
@@ -1004,7 +1004,7 @@ export const useConnectionStore = defineStore("connection", () => {
           }
         }
         const schemas = await api.listSchemas(connectionId, effectiveDb);
-        const visibleSchemas = filterSchemaNamesForConnection(filterDatabaseNamesForConnection(schemas, config), config, effectiveDb || "");
+        const visibleSchemas = filterSchemaNamesForConnection(schemas, config, effectiveDb || "");
         const schemaNodes: TreeNode[] = sortSidebarNames(visibleSchemas).map((s) => ({
           id: `${connectionId}:${s}:${s}`,
           label: s,

@@ -1213,6 +1213,7 @@ export default {
     searchPlaceholder: "スキーマを検索...",
     selectedCount: "{selected}/{total}件選択中",
     selectAll: "すべて選択",
+    selectFiltered: "検索結果を選択",
     clear: "クリア",
     showAll: "すべて表示",
     save: "保存",

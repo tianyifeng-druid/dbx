@@ -119,7 +119,11 @@ function selectAll() {
 }
 
 function selectFiltered() {
-  selectedNames.value = new Set(filteredSchemaNames.value);
+  const next = new Set(selectedNames.value);
+  for (const name of filteredSchemaNames.value) {
+    next.add(name);
+  }
+  selectedNames.value = next;
 }
 
 function clearSelection() {

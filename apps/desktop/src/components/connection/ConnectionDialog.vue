@@ -842,6 +842,7 @@ function onDbTypeChange(val: string) {
   customDriverName.value = "";
   applyProfile(val, !!editingId.value);
   resetTestState();
+  resetVisibleSchemasState();
 }
 
 function switchH2ConnectionMode(mode: H2ConnectionMode) {
