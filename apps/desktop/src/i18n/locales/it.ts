@@ -1147,6 +1147,7 @@ export default {
     searchPlaceholder: "Cerca database...",
     selectedCount: "{selected}/{total} selezionati",
     selectAll: "Seleziona tutto",
+    selectFiltered: "Seleziona risultati ricerca",
     clear: "Cancella",
     showAll: "Mostra tutto",
     showSystemDatabases: "Mostra database di sistema",

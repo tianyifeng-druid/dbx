@@ -1147,6 +1147,7 @@ export default {
     searchPlaceholder: "Pesquisar bancos de dados...",
     selectedCount: "{selected}/{total} selecionados",
     selectAll: "Selecionar todos",
+    selectFiltered: "Selecionar resultados da pesquisa",
     clear: "Limpar",
     showAll: "Mostrar todos",
     showSystemDatabases: "Mostrar bancos de dados do sistema",
