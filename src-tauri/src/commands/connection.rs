@@ -187,6 +187,7 @@ mod tests {
             password: "secret".to_string(),
             database: Some("RestCloud_V45PUB_Gateway".to_string()),
             visible_databases: None,
+            visible_schemas: None,
             attached_databases: Vec::new(),
             color: None,
             transport_layers: Vec::new(),
@@ -431,7 +432,7 @@ async fn sync_connection_configs(state: &AppState, configs: &[ConnectionConfig])
 }
 
 fn is_transient_runtime_config_id(id: &str) -> bool {
-    id.starts_with("__test_") || id.starts_with("__visible_draft_")
+    id.starts_with("__test_") || id.starts_with("__visible_draft_") || id.starts_with("__visible_schema_draft_")
 }
 
 #[cfg(feature = "mq-admin")]
@@ -1020,7 +1021,7 @@ pub async fn disconnect_db(state: State<'_, Arc<AppState>>, connection_id: Strin
     state.remove_connection_pools_detached(&connection_id).await;
     drop_mq_adapters_for_connection_ids(state.inner(), std::slice::from_ref(&connection_id)).await;
     state.reset_connection_transport(&connection_id).await;
-    if connection_id.starts_with("__visible_draft_") {
+    if connection_id.starts_with("__visible_draft_") || connection_id.starts_with("__visible_schema_draft_") {
         state.configs.write().await.remove(&connection_id);
     }
     Ok(())

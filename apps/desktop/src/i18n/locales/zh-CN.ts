@@ -1300,7 +1300,7 @@ export default {
     clear: "清空",
     showAll: "显示全部",
     save: "保存",
-    emptySelection: "至少选择一个 Schema，或使用 `显示全部` 清除过滤。",
+    emptySelection: "至少选择一个 Schema，或使用「显示全部」清除过滤。",
     loadFailed: "加载 Schema 失败：{message}",
   },
   tree: {

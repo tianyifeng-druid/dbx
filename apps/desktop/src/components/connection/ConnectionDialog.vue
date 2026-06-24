@@ -1769,6 +1769,7 @@ function resetVisibleSchemasState() {
 }
 
 async function openVisibleSchemasPicker() {
+  if (!ensureConnectionHostResolvedFromUrl()) return;
   if (!canChooseVisibleSchemas.value || isLoadingVisibleSchemas.value) return;
   isLoadingVisibleSchemas.value = true;
   visibleSchemaError.value = "";

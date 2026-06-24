@@ -142,7 +142,7 @@ async function showAllSchemas() {
   if (config?.visible_schemas?.[database || ""]) {
     await connectionStore.clearVisibleSchemas(props.connectionId, database);
   }
-  selectedNames.value = new Set(isDraftMode.value ? props.draftSchemaNames || [] : schemaNames.value);
+  selectedNames.value = new Set(schemaNames.value);
   emit("update:open", false);
 }
 

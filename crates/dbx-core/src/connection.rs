@@ -2030,6 +2030,7 @@ mod tests {
             password: "secret".to_string(),
             database: database.map(str::to_string),
             visible_databases: None,
+            visible_schemas: None,
             attached_databases: Vec::new(),
             color: None,
             transport_layers: Vec::new(),

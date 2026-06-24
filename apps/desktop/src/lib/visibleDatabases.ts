@@ -102,9 +102,11 @@ export function visibleSchemaFilterIsEnabled(visibleSchemas: Record<string, stri
   return Array.isArray(visibleSchemas?.[database]);
 }
 
-export function filterSchemaNamesForConnection(schemaNames: string[], connection: Pick<ConnectionConfig, "visible_schemas"> | undefined, database: string): string[] {
+export function filterSchemaNamesForConnection(schemaNames: string[], connection: Pick<ConnectionConfig, "db_type" | "visible_schemas"> | undefined, database: string): string[] {
   const visibleSchemas = connection?.visible_schemas;
-  if (!visibleSchemaFilterIsEnabled(visibleSchemas, database)) return schemaNames;
+  if (!visibleSchemaFilterIsEnabled(visibleSchemas, database)) {
+    return schemaNames.filter((name) => !isSystemDatabaseName(connection?.db_type, name));
+  }
   const visible = new Set(visibleSchemas![database]);
   return schemaNames.filter((name) => visible.has(name));
 }
