@@ -3,7 +3,7 @@ import { computed, ref, defineAsyncComponent, watch, nextTick, onMounted, onUnmo
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/safeStorage";
 import type { CSSProperties } from "vue";
 import { useI18n } from "vue-i18n";
-import { Check, Columns3, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin } from "@lucide/vue";
+import { Check, Columns3, Loader2, Search, Bot, GitBranch, BarChart3, TableProperties, ChevronDown, ChevronUp, Inbox, RefreshCcw, Wrench, Toolbox, ListChecks, Database, FileUp, Download, X, Pin, SquareDashed } from "@lucide/vue";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
 import { Button } from "@/components/ui/button";
@@ -49,6 +49,7 @@ const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explai
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
@@ -62,8 +63,8 @@ import { chartableColumnIndexes } from "@/lib/chartData";
 import type { SqlExecutionOverride } from "@/lib/sqlExecutionTarget";
 import type { DataGridSortMode } from "@/lib/dataGridSort";
 import { useTabScroll } from "@/composables/useTabScroll";
-import type { QueryTab, ConnectionConfig, TableInfoTab } from "@/types/database";
-import type { SqlFormatDialect } from "@/lib/sqlFormatter";
+import type { QueryTab, ConnectionConfig, TableInfoTab, TreeNode, VectorCollectionMeta } from "@/types/database";
+import { sqlFormatDialectForDbType, type SqlFormatDialect } from "@/lib/sqlFormatter";
 
 type DataGridHandle = {
   onToolbarRefresh: () => Promise<void> | void;
@@ -138,6 +139,7 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const connectionStore = useConnectionStore();
+const settingsStore = useSettingsStore();
 const { toast } = useToast();
 const DEFAULT_QUERY_RESULTS_PANE_SIZE = 68;
 
@@ -169,6 +171,7 @@ const queryEditorRef = ref<InstanceType<typeof QueryEditor>>();
 const resultTabsScrollerRef = ref<HTMLElement | null>(null);
 const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
+const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
@@ -177,23 +180,30 @@ const activeTableMeta = computed(() => props.activeTab.tableMeta);
 const activeDataTabTableMeta = computed(() => tableMetaForDataTab(props.activeTab));
 const activeEffectiveDatabaseType = computed(() => effectiveDatabaseTypeForConnection(props.activeConnection));
 
-const activeSqlFormatDialect = computed<SqlFormatDialect>(() => {
-  switch (activeEffectiveDatabaseType.value) {
-    case "mysql":
-      return "mysql";
-    case "postgres":
-    case "kwdb":
-      return "postgres";
-    case "sqlite":
-    case "rqlite":
-    case "turso":
-      return "sqlite";
-    case "sqlserver":
-      return "sqlserver";
-    default:
-      return "generic";
+function findNodeInTree(nodes: TreeNode[], id: string): TreeNode | undefined {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    if (node.children) {
+      const found = findNodeInTree(node.children, id);
+      if (found) return found;
+    }
   }
+  return undefined;
+}
+
+function setDataGridCanvasRenderMode(value: boolean) {
+  settingsStore.updateEditorSettings({ dataGridRenderMode: value ? "canvas" : "dom" });
+}
+
+const activeTabDimension = computed(() => {
+  const tab = props.activeTab;
+  if (!tab.connectionId || tab.mode !== "vector") return undefined;
+  const nodeId = `${tab.connectionId}:__vector_collection:${tab.sql}`;
+  const meta = findNodeInTree(connectionStore.treeNodes, nodeId)?.meta;
+  return meta && "dimension" in meta ? (meta as VectorCollectionMeta).dimension : undefined;
 });
+
+const activeSqlFormatDialect = computed<SqlFormatDialect>(() => sqlFormatDialectForDbType(activeEffectiveDatabaseType.value));
 
 const editorDialect = computed<"mysql" | "postgres" | "sqlserver">(() => {
   if (activeEffectiveDatabaseType.value === "postgres" || activeEffectiveDatabaseType.value === "kwdb") return "postgres";
@@ -242,10 +252,11 @@ const activeQueryError = computed(() => {
   return String(result.rows[0]?.[0] ?? "");
 });
 const hasQueryOutput = computed(() => !!props.activeTab.result || !!props.activeTab.explainPlan || !!props.activeTab.explainError || props.activeTab.isExecuting === true || props.activeTab.isExplaining === true);
+const visibleResultItems = computed(() => tabularResultItems(props.activeTab.results ?? (props.activeTab.result ? [props.activeTab.result] : undefined)));
 const tabularResults = computed(() => tabularResultItems(props.activeTab.results));
 const allResultExportSheets = computed(() =>
   tabularResults.value.map((item) => ({
-    sheetName: t("tabs.resultN", { n: item.n }),
+    sheetName: item.label || t("tabs.resultN", { n: item.n }),
     result: item.result,
   })),
 );
@@ -256,7 +267,7 @@ const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
 watch(
-  () => tabularResults.value.map((item) => item.index).join(","),
+  () => visibleResultItems.value.map((item) => item.index).join(","),
   () => {
     nextTick(updateResultTabsScrollbar);
   },
@@ -265,7 +276,7 @@ const summaryItems = computed(() => executionSummaryItems(props.activeTab));
 const hasExecutionSummary = computed(() => summaryItems.value.length > 0 || props.activeTab.isExecuting);
 const hasTabularResult = computed(() => {
   if (props.activeTab.result?.columns.length) return true;
-  return tabularResults.value.length > 0;
+  return visibleResultItems.value.length > 0;
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const resultsPaneOpen = ref(false);
@@ -580,6 +591,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               :format-dialect="activeSqlFormatDialect"
               :format-request-id="formatSqlRequest?.tabId === activeTab.id ? formatSqlRequest.id : undefined"
               :execution-error="activeQueryError"
+              :execution-error-sql="activeTab.lastExecutedSql"
               :initial-viewport="activeTab.editorViewport"
               :initial-selection="activeTab.editorSelection"
               @update:model-value="emit('editorUpdate', activeTab.id, $event)"
@@ -651,7 +663,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   </DropdownMenuContent>
                 </DropdownMenu>
               </template>
-              <template v-if="tabularResults.length > 1">
+              <template v-if="visibleResultItems.length > 0">
                 <span class="mx-1 h-4 w-px shrink-0 bg-border" />
                 <div class="relative min-w-0 flex-1 self-stretch">
                   <div v-if="hasResultTabOverflow" class="result-tab-scrollbar" :class="{ 'result-tab-scrollbar--dragging': isResultTabsScrollbarDragging }" @pointerdown="startResultTabsScrollbarDrag">
@@ -659,17 +671,18 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                   </div>
                   <div ref="resultTabsScrollerRef" class="result-tab-scroll flex h-full items-center gap-1 overflow-x-auto overflow-y-hidden px-1" :style="resultTabsScrollerStyle" @scroll="updateResultTabsScrollbar" @wheel="onResultTabsWheel">
                     <Button
-                      v-for="item in tabularResults"
+                      v-for="item in visibleResultItems"
                       :key="item.index"
                       size="sm"
-                      :variant="activeOutputView === 'result' && activeTab.activeResultIndex === item.index ? 'default' : 'ghost'"
-                      class="h-6 px-2 text-xs shrink-0"
+                      :variant="activeOutputView === 'result' && (activeTab.activeResultIndex ?? 0) === item.index ? 'default' : 'ghost'"
+                      class="h-6 max-w-48 shrink-0 overflow-hidden text-ellipsis whitespace-nowrap px-2 text-xs"
+                      :title="item.label || t('tabs.resultN', { n: item.n })"
                       @click="
                         queryStore.setActiveResultIndex(activeTab.id, item.index);
                         emit('update:activeOutputView', 'result');
                       "
                     >
-                      {{ t("tabs.resultN", { n: item.n }) }}
+                      {{ item.label || t("tabs.resultN", { n: item.n }) }}
                     </Button>
                   </div>
                 </div>
@@ -700,7 +713,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                       size="icon"
                       class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
                       :class="{
-                        'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose,
+                        'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose || dataGridRenderMode === 'dom',
                       }"
                       :title="t('grid.viewOptions')"
                       :aria-label="t('grid.viewOptions')"
@@ -712,6 +725,16 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                     <div class="border-b bg-muted/40 px-3 py-2">
                       <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
                     </div>
+                    <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                      <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
+                        <span class="min-w-0 flex items-center gap-1.5 font-medium">
+                          <SquareDashed class="h-3.5 w-3.5 text-muted-foreground" />
+                          {{ t("grid.canvasRenderMode") }}
+                          <span class="text-muted-foreground">/ {{ t("grid.domRenderMode") }}</span>
+                        </span>
+                        <Switch size="sm" :model-value="dataGridRenderMode === 'canvas'" :aria-label="t('grid.renderModeHint')" @update:model-value="setDataGridCanvasRenderMode" />
+                      </label>
+                    </LightTooltip>
                     <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
                       <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
                         <span class="min-w-0 flex items-center gap-1.5 font-medium">
@@ -816,6 +839,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
                 :query-result-export-request="(options: { exportId: string; filePath: string; format: 'csv' | 'xlsx' }) => queryStore.buildQueryResultExportRequest(activeTab.id, options)"
                 :all-export-results="allResultExportSheets"
+                :export-file-base-name="activeTab.title"
                 @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
                 @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset)"
                 @paginate="(offset: number, limit: number, whereInput?: string, orderBy?: string) => emit('paginate', offset, limit, whereInput, orderBy)"
@@ -948,7 +972,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 size="icon"
                 class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
                 :class="{
-                  'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose,
+                  'bg-accent text-foreground': dataGridRef?.nullColumnsHidden || dataGridRef?.multiRowTranspose || dataGridRenderMode === 'dom',
                 }"
                 :title="t('grid.viewOptions')"
                 :aria-label="t('grid.viewOptions')"
@@ -960,6 +984,16 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               <div class="border-b bg-muted/40 px-3 py-2">
                 <div class="text-xs font-semibold">{{ t("grid.viewOptions") }}</div>
               </div>
+              <LightTooltip :text="t('grid.renderModeHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
+                <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
+                  <span class="min-w-0 flex items-center gap-1.5 font-medium">
+                    <SquareDashed class="h-3.5 w-3.5 text-muted-foreground" />
+                    {{ t("grid.canvasRenderMode") }}
+                    <span class="text-muted-foreground">/ {{ t("grid.domRenderMode") }}</span>
+                  </span>
+                  <Switch size="sm" :model-value="dataGridRenderMode === 'canvas'" :aria-label="t('grid.renderModeHint')" @update:model-value="setDataGridCanvasRenderMode" />
+                </label>
+              </LightTooltip>
               <LightTooltip :text="t('grid.transposeMultiRowHint')" side="left" :side-offset="6" :delay="0" :open-on-focus="false">
                 <label class="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-accent">
                   <span class="min-w-0 flex items-center gap-1.5 font-medium">
@@ -1007,6 +1041,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
           :page-limit="activeTab.resultPageLimit"
           :on-execute-sql="async (sql: string) => emit('executeSql', sql)"
           :full-export-result="(onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => queryStore.fetchTabResultForExport(activeTab.id, onProgress)"
+          :export-file-base-name="activeTab.title"
           @update:where-input="(v: string) => (activeTab.whereInput = v)"
           @update:order-by-input="(v: string) => (activeTab.orderByInput = v)"
           @reload="(sql?: string, searchText?: string, whereInput?: string, orderBy?: string, limit?: number, offset?: number) => emit('reload', sql, searchText, whereInput, orderBy, limit, offset)"
@@ -1068,7 +1103,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <!-- Vector mode: Qdrant and Milvus collections -->
     <template v-else-if="activeTab.mode === 'vector'">
       <div class="flex-1 min-h-0">
-        <VectorBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :database-type="activeEffectiveDatabaseType" />
+        <VectorBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :collection="activeTab.sql" :collection-label="activeTab.title" :database-type="activeEffectiveDatabaseType" :dimension="activeTabDimension" />
       </div>
     </template>
 

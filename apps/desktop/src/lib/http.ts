@@ -30,6 +30,7 @@ import type {
   SavedSqlFolder,
   SavedSqlLibrary,
 } from "@/types/database";
+import type { CollectionInfo } from "@/types/database";
 import type { SchemaDiffPreparation, SchemaDiffPreparationOptions, TableDiff, FunctionDiff, SequenceDiff, RuleDiff, OwnerDiff } from "@/lib/schemaDiff";
 import type { SidebarObjectKind } from "@/lib/databaseObjectCapabilities";
 import type { AiConfig, AiTestConnectionResult } from "@/stores/settingsStore";
@@ -48,6 +49,7 @@ import type {
   DriverInstallProgress,
   JavaRuntimeConfig,
   UpdateInfo,
+  UpdateDownloadSource,
   RedisDatabaseInfo,
   RedisValue,
   RedisScanResult,
@@ -56,6 +58,7 @@ import type {
   RedisNodeEndpoint,
   KvValue,
   KvListPrefixResponse,
+  KvListPrefixOptions,
   KvGetResponse,
   KvPutOptions,
   KvPutResponse,
@@ -163,7 +166,7 @@ async function del<T>(url: string): Promise<T> {
   return res.json();
 }
 
-function qs(params: Record<string, string | number | undefined>): string {
+function qs(params: Record<string, string | number | boolean | undefined>): string {
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) sp.set(k, String(v));
@@ -402,6 +405,10 @@ export async function loadSavedSqlLibrary(): Promise<SavedSqlLibrary> {
   return get("/api/saved-sql");
 }
 
+export async function loadSavedSqlFile(id: string): Promise<SavedSqlFile | null> {
+  return get(`/api/saved-sql/${encodeURIComponent(id)}`);
+}
+
 export async function saveSavedSqlFolder(folder: SavedSqlFolder): Promise<SavedSqlFolder> {
   return post("/api/saved-sql/folders", folder);
 }
@@ -478,8 +485,8 @@ export async function deleteSchemaCachePrefix(prefix: string): Promise<void> {
   return del(`/api/schema/cache-prefix?${qs({ prefix })}`);
 }
 
-export async function listSchemas(connectionId: string, database: string): Promise<string[]> {
-  return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database })}`);
+export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false): Promise<string[]> {
+  return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database, apply_visible_filter: applyVisibleFilter || undefined })}`);
 }
 
 export async function listSchemaInfos(connectionId: string, database: string): Promise<SchemaInfo[]> {
@@ -526,6 +533,10 @@ export async function getColumns(connectionId: string, database: string, schema:
   return get(`/api/schema/columns?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
 
+export async function listDataTypes(connectionId: string, database: string): Promise<string[]> {
+  return get(`/api/schema/data-types?${qs({ connection_id: connectionId, database })}`);
+}
+
 export async function listIndexes(connectionId: string, database: string, schema: string, table: string): Promise<IndexInfo[]> {
   return get(`/api/schema/indexes?${qs({ connection_id: connectionId, database, schema, table })}`);
 }
@@ -564,7 +575,7 @@ export async function listFunctions(connectionId: string, database: string, sche
 }
 
 export async function listSequences(connectionId: string, database: string, schema: string, withLastValues: boolean): Promise<SequenceInfo[]> {
-  return get(`/api/schema/sequences?${qs({ connection_id: connectionId, database, schema, with_last_values: withLastValues ? 1 : 0 })}`);
+  return get(`/api/schema/sequences?${qs({ connection_id: connectionId, database, schema, with_last_values: withLastValues })}`);
 }
 
 export async function listRules(connectionId: string, database: string, schema: string): Promise<RuleInfo[]> {
@@ -1142,7 +1153,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
     es.onmessage = (e) => {
       const progress: TransferProgress = JSON.parse(e.data);
       onProgress(progress);
-      if (progress.status === "done" || progress.status === "cancelled") {
+      if (progress.status === "done" || progress.status === "error" || progress.status === "cancelled") {
         es.close();
         resolve();
       }
@@ -1596,8 +1607,8 @@ export async function etcdDelete(connectionId: string, key: string): Promise<KvD
 // ZooKeeper
 // ---------------------------------------------------------------------------
 
-export async function zookeeperListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null): Promise<KvListPrefixResponse> {
-  return post("/api/zookeeper/list-prefix", { connectionId, prefix, limit, continuation });
+export async function zookeeperListPrefix(connectionId: string, prefix: string, limit: number, continuation?: string | null, options?: KvListPrefixOptions | null): Promise<KvListPrefixResponse> {
+  return post("/api/zookeeper/list-prefix", { connectionId, prefix, limit, continuation, recursive: options?.recursive ?? null });
 }
 
 export async function zookeeperGet(connectionId: string, key: string): Promise<KvGetResponse> {
@@ -1684,7 +1695,7 @@ export async function mongoListDatabases(connectionId: string): Promise<string[]
   return post("/api/mongo/list-databases", { connectionId });
 }
 
-export async function mongoListCollections(connectionId: string, database: string): Promise<string[]> {
+export async function mongoListCollections(connectionId: string, database: string): Promise<CollectionInfo[]> {
   return post("/api/mongo/list-collections", { connectionId, database });
 }
 
@@ -1701,10 +1712,11 @@ export async function mongoDropCollection(connectionId: string, database: string
 }
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
-  return mongoListCollections(connectionId, "default");
+  const collections = await mongoListCollections(connectionId, "default");
+  return collections.map((c) => c.name);
 }
 
-export async function vectorListCollections(connectionId: string): Promise<string[]> {
+export async function vectorListCollections(connectionId: string): Promise<CollectionInfo[]> {
   return mongoListCollections(connectionId, "default");
 }
 
@@ -1802,6 +1814,10 @@ export async function installMcpServer(): Promise<string> {
 
 export async function getSystemProxyUrl(): Promise<string | null> {
   return null;
+}
+
+export async function downloadAndInstallUpdate(_source: UpdateDownloadSource, _latestVersion?: string): Promise<void> {
+  throw new Error("In-app update installation is only available in the desktop app.");
 }
 
 export async function getAppVersion(): Promise<string> {

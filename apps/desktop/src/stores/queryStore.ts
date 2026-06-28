@@ -7,7 +7,7 @@ import { orderPinnedFirst } from "@/lib/pinnedItems";
 import { canCancelQueryExecution } from "@/lib/queryExecutionState";
 import { closeAllTabsState, closeOtherTabsState } from "@/lib/tabCloseActions";
 import { buildExplainSql, parseExplainResult, parseDamengExplainText } from "@/lib/explainPlan";
-import { allEditableColumnsWriteable, allPrimaryKeysPresent, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sqlAnalysis";
+import { allEditableColumnsWriteable, allPrimaryKeysPresent, analyzeEditableQuery, sourceColumnsForResult, type EditableQueryInfo } from "@/lib/sqlAnalysis";
 import { restoreOpenTabsState, serializeOpenTabs } from "@/lib/openTabsPersistence";
 import {
   evaluateMongoAggregateSafety,
@@ -27,7 +27,7 @@ import {
 import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
 import { nextRedisCommandDb } from "@/lib/redisCommandSession";
 import { isRedisMutatingCommand } from "@/lib/redisCommandTable";
-import { supportsDatabaseFeature } from "@/lib/databaseCapabilities";
+import { usesAgentCursorForQuery } from "@/lib/databaseDriverManifest";
 import { canUseKeylessRowPredicate, editableRowIdentifierColumns } from "@/lib/tableEditing";
 import { TABLE_DATA_EXPORT_PAGE_SIZE } from "@/lib/tableDataExport";
 import { tableMetaForDataTab } from "@/lib/tableDataTabMeta";
@@ -36,6 +36,7 @@ import { connectionUsesDatabaseObjectTreeMode, connectionUsesSchemaExecutionCont
 import { queryTimeoutSecsForConnection } from "@/lib/queryTimeout";
 import { sortDataGridRows, type DataGridSortDirection } from "@/lib/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/paginationPageSize";
+import { splitSqlStatementRanges } from "@/lib/sqlStatementRanges";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabResultCache";
 import { decodeQueryResultArchive, encodeQueryResultArchive, type DecodedQueryResultArchive } from "@/lib/queryResultArchive";
@@ -49,6 +50,7 @@ const STORAGE_KEY = "dbx-open-tabs";
 const ACTIVE_TAB_KEY = "dbx-active-tab";
 const ORACLE_LIKE_METADATA_TYPES = new Set<string>(["oracle", "dameng", "oceanbase-oracle"]);
 const BACKGROUND_CLIENT_SESSION_SUFFIXES = ["count", "explain", "export"] as const;
+const CANCEL_QUERY_TIMEOUT_MS = 10_000;
 
 interface BuildQueryResultExportRequestOptions {
   exportId: string;
@@ -82,6 +84,27 @@ function markQueryResultRunsRowsRaw(resultRuns: NonNullable<QueryTab["resultRuns
   return resultRuns;
 }
 
+function queryResultSourceLabel(sql: string, database: string | undefined): string | undefined {
+  const analysis = analyzeEditableQuery(sql);
+  if (!analysis) return undefined;
+  const qualifier = analysis.schema || database?.trim();
+  return qualifier ? `${qualifier}.${analysis.tableName}` : analysis.tableName;
+}
+
+function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType): QueryResult[] {
+  const statements = splitSqlStatementRanges(sql, databaseType);
+  let statementIndex = 0;
+  for (const result of results) {
+    const statement = statements[statementIndex++];
+    if (result.columns.length === 0) continue;
+    if (!statement) continue;
+    result.sourceStatement = statement.sql;
+    const label = queryResultSourceLabel(statement.sql, database);
+    if (label) result.sourceLabel = label;
+  }
+  return results;
+}
+
 async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: number, message: string): Promise<T> {
   if (timeoutSecs === 0) return promise;
 
@@ -91,6 +114,20 @@ async function withFrontendQueryTimeout<T>(promise: Promise<T>, timeoutSecs: num
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(message)), timeoutSecs * 1000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function withCancelQueryTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Cancel request timed out after 10s.")), CANCEL_QUERY_TIMEOUT_MS);
       }),
     ]);
   } finally {
@@ -986,6 +1023,10 @@ export const useQueryStore = defineStore("query", () => {
   function openSavedSql(file: SavedSqlFile) {
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
+      if (!existing.sql && file.sql) {
+        existing.sql = file.sql;
+        existing.originalSql = file.sql;
+      }
       activeTabId.value = existing.id;
       return existing.id;
     }
@@ -1009,6 +1050,21 @@ export const useQueryStore = defineStore("query", () => {
     tabs.value.push(tab);
     activeTabId.value = id;
     return id;
+  }
+
+  async function hydrateSavedSqlTabs() {
+    const savedSqlStore = useSavedSqlStore();
+    const linkedTabs = tabs.value.filter((tab) => tab.savedSqlId && tab.sql === "");
+    for (const tab of linkedTabs) {
+      const file = await savedSqlStore.ensureFileContent(tab.savedSqlId!);
+      if (!file) continue;
+      tab.title = tab.customTitle ? tab.title : file.name;
+      tab.connectionId = file.connectionId;
+      tab.database = file.database;
+      tab.schema = file.schema;
+      tab.sql = file.sql;
+      tab.originalSql = file.sql;
+    }
   }
 
   function togglePinnedTab(id: string) {
@@ -1069,9 +1125,9 @@ export const useQueryStore = defineStore("query", () => {
     // Sync connection change back to the saved SQL file if this tab is linked
     if (tab.savedSqlId) {
       const savedSqlStore = useSavedSqlStore();
-      const existing = savedSqlStore.getFile(tab.savedSqlId);
-      if (existing) {
-        void savedSqlStore.saveFile({
+      void savedSqlStore.ensureFileContent(tab.savedSqlId).then((existing) => {
+        if (!existing) return;
+        return savedSqlStore.saveFile({
           id: existing.id,
           connectionId,
           name: existing.name,
@@ -1079,7 +1135,7 @@ export const useQueryStore = defineStore("query", () => {
           schema: existing.schema,
           sql: existing.sql,
         });
-      }
+      });
     }
   }
 
@@ -1428,7 +1484,7 @@ export const useQueryStore = defineStore("query", () => {
       }
       const conn = connStore.getConfig(tab.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
-      const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
+      const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const settingsStore = useSettingsStore();
       console.info("[DBX][executeTabSql:previous-session-close:start]", { traceId, elapsed: elapsed() });
@@ -1728,7 +1784,8 @@ export const useQueryStore = defineStore("query", () => {
       });
       const executionPromise = api.executeMulti(tab.connectionId, tab.database, sqlToExecute, executionSchema, executionId, executionOptions);
       const frontendTimeoutSecs = Math.max(queryTimeoutSecs * 2, 60);
-      const results = markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, queryTimeoutSecs === 0 ? 0 : frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs })));
+      const sourceLabelDatabase = tab.database || conn?.database;
+      const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, queryTimeoutSecs === 0 ? 0 : frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType);
       console.info("[DBX][executeTabSql:execute-multi:done]", {
         traceId,
         resultCount: results.length,
@@ -1946,7 +2003,7 @@ export const useQueryStore = defineStore("query", () => {
     if (!executionId) return false;
     tab.isCancelling = true;
     try {
-      const canceled = await api.cancelQuery(executionId);
+      const canceled = await withCancelQueryTimeout(api.cancelQuery(executionId));
       if (!canceled) {
         const current = tabs.value.find((t) => t.id === id);
         if (current && current.executionId === executionId) {
@@ -1962,7 +2019,10 @@ export const useQueryStore = defineStore("query", () => {
       if (tab) useConnectionStore().recordConnectionLostError(tab.connectionId, e);
       const current = tabs.value.find((t) => t.id === id);
       if (current && current.executionId === executionId) {
+        current.isExecuting = false;
         current.isCancelling = false;
+        current.executionId = undefined;
+        current.queryExecutionStartedAt = undefined;
         current.result = toErrorResult(e);
       }
       return false;
@@ -2172,6 +2232,7 @@ export const useQueryStore = defineStore("query", () => {
             databaseType: effectiveDbType,
             schema: tableMeta.schema,
             tableName: tableMeta.tableName,
+            tableType: tableMeta.tableType,
             columns: tableMeta.columns.map((column) => column.name),
             primaryKeys,
             whereInput: tab.whereInput,
@@ -2218,12 +2279,14 @@ export const useQueryStore = defineStore("query", () => {
     const conn = connStore.getConfig(tab.connectionId);
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
-    const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
+    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
     const queryBaseSql = tab.resultBaseSql ?? sql;
-    const exportRowLimit = useSettingsStore().editorSettings.exportRowLimit;
+    const exportSettings = useSettingsStore().editorSettings;
+    const exportRowLimit = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : Number.POSITIVE_INFINITY;
+    const agentExportMaxRows = exportSettings.exportRowLimitEnabled ? exportSettings.exportRowLimit : 2_147_483_647;
     // Use the already-computed total row count as a progress estimate so the
     // export dialog shows a moving bar instead of a stuck 0 while paginating.
-    const totalRows = typeof tab.resultTotalRowCount === "number" ? tab.resultTotalRowCount : null;
+    const totalRows = typeof tab.resultTotalRowCount === "number" ? Math.min(tab.resultTotalRowCount, exportRowLimit) : null;
     const pageLimit = Math.max(tab.resultPageLimit ?? 0, TABLE_DATA_EXPORT_PAGE_SIZE);
     const rows: QueryResult["rows"] = [];
     let columns: string[] = [];
@@ -2248,7 +2311,7 @@ export const useQueryStore = defineStore("query", () => {
         if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return tab.result;
         const executionOptions = plan.useAgentResultSession
           ? {
-              maxRows: exportRowLimit,
+              maxRows: agentExportMaxRows,
               fetchSize: plan.pageLimit,
               pageSize: plan.pageLimit,
               resultSessionId: sessionId,
@@ -2296,9 +2359,10 @@ export const useQueryStore = defineStore("query", () => {
     const settings = useSettingsStore().editorSettings;
     const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
     if (!effectiveDbType) return undefined;
-    const useAgentCursor = conn?.db_type === "jdbc" || supportsDatabaseFeature(conn?.db_type, "driverManagement");
+    const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
     const queryBaseSql = tab.resultBaseSql ?? sql;
-    const totalRows = typeof tab.resultTotalRowCount === "number" ? tab.resultTotalRowCount : null;
+    const rowLimit = settings.exportRowLimitEnabled ? settings.exportRowLimit : null;
+    const totalRows = typeof tab.resultTotalRowCount === "number" ? (rowLimit === null ? tab.resultTotalRowCount : Math.min(tab.resultTotalRowCount, rowLimit)) : null;
     const clientSessionId = tabClientSessionId(tab, "export");
 
     return {
@@ -2313,7 +2377,7 @@ export const useQueryStore = defineStore("query", () => {
       filePath: options.filePath,
       format: options.format,
       pageSize: settings.exportBatchSize,
-      rowLimit: settings.exportRowLimitEnabled ? settings.exportRowLimit : null,
+      rowLimit,
       totalRows,
       timeoutSecs: queryTimeoutSecsForConnection(conn),
       keysetOptimizationEnabled: settings.queryExportKeysetOptimizationEnabled,
@@ -2354,6 +2418,7 @@ export const useQueryStore = defineStore("query", () => {
     linkSavedSql,
     linkExternalSqlPath,
     openSavedSql,
+    hydrateSavedSqlTabs,
     togglePinnedTab,
     reorderTab,
     updateDatabase,
