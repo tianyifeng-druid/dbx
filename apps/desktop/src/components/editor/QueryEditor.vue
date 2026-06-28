@@ -2249,7 +2249,7 @@ onMounted(async () => {
               if (qualifierMatch) {
                 const qQualifier = qualifierMatch[1].toLowerCase();
                 const qTableName = qualifierMatch[2].toLowerCase();
-                const matchedRef = referencedTables.find((rt) => rt.name.toLowerCase() === qTableName && (rt.schema?.toLowerCase() === qQualifier || rt.alias?.toLowerCase() === qQualifier));
+                const matchedRef = referencedTables.find((rt) => rt.name.toLowerCase() === qTableName && rt.schema?.toLowerCase() === qQualifier);
                 if (matchedRef) {
                   emit("clickTable", matchedRef.schema ? `${matchedRef.schema}.${matchedRef.name}` : matchedRef.name);
                   return;
