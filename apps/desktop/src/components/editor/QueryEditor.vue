@@ -2241,9 +2241,20 @@ onMounted(async () => {
                 return rt;
               });
 
-              // Check if identifier has a qualifier (e.g., c.card_name)
+              // Check if identifier has a qualifier (e.g., c.card_name or schema.table)
               const qualifierMatch = /^(.+)\.(.+)$/.exec(identifier);
               const qualifier = qualifierMatch ? qualifierMatch[1] : null;
+
+              // 2b. Qualified identifier (schema.table): check against SQL-parsed referenced tables
+              if (qualifierMatch) {
+                const qQualifier = qualifierMatch[1].toLowerCase();
+                const qTableName = qualifierMatch[2].toLowerCase();
+                const matchedRef = referencedTables.find((rt) => rt.name.toLowerCase() === qTableName && (rt.schema?.toLowerCase() === qQualifier || rt.alias?.toLowerCase() === qQualifier));
+                if (matchedRef) {
+                  emit("clickTable", matchedRef.schema ? `${matchedRef.schema}.${matchedRef.name}` : matchedRef.name);
+                  return;
+                }
+              }
               const colName = qualifierMatch ? qualifierMatch[2] : identifier;
               const colLower = colName.toLowerCase();
 
