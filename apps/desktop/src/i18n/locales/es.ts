@@ -911,6 +911,7 @@ export default withEnglishFallback({
     sequence: "Secuencia",
     package: "Paquete",
     packageBody: "Cuerpo del Paquete",
+    noResults: "Sin resultados",
   },
   quickOpen: {
     placeholder: "Buscar conexiones, bases de datos, tablas y otros objetos...",
@@ -1988,6 +1989,12 @@ export default withEnglishFallback({
     editConfig: "Editar config",
     retry: "Reintentar",
     targetTableBusy: "Otra transferencia ya está escribiendo en la(s) tabla(s) de destino: {tables}",
+    selectConnection: "Seleccionar conexión",
+    selectDatabase: "Seleccionar base de datos",
+    selectSchema: "Seleccionar esquema",
+    searchConnection: "Buscar conexiones...",
+    searchDatabase: "Buscar bases de datos...",
+    searchSchema: "Buscar esquemas...",
   },
   tableImport: {
     title: "Importar datos a tabla",
@@ -2301,6 +2308,9 @@ export default withEnglishFallback({
     copied: "Copiado al portapapeles",
     saveConfigPrompt: "Por favor ingresa el nombre de la config:",
     close: "Cerrar",
+    searchConnection: "Buscar conexiones...",
+    searchDatabase: "Buscar bases de datos...",
+    searchSchema: "Buscar esquemas...",
   },
   schemaDiff: {
     optionsTitle: "Opciones de comparación",
@@ -2354,6 +2364,7 @@ export default withEnglishFallback({
   dataCompare: {
     title: "Comparar datos",
     selectTable: "Seleccionar tabla",
+    searchTable: "Buscar tablas...",
     sourceTables: "Tablas de origen",
     targetTable: "Tabla de destino",
     searchTables: "Buscar tablas...",

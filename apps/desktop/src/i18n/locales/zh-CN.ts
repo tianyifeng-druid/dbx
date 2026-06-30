@@ -915,6 +915,7 @@ export default withEnglishFallback({
     sequence: "序列",
     package: "包",
     packageBody: "包体",
+    noResults: "无结果",
   },
   quickOpen: {
     placeholder: "搜索连接、数据库、表和其他对象...",
@@ -1992,6 +1993,12 @@ export default withEnglishFallback({
     editConfig: "编辑配置",
     retry: "重新传输",
     targetTableBusy: "已有传输任务正在写入目标表：{tables}",
+    selectConnection: "选择连接",
+    selectDatabase: "选择数据库",
+    selectSchema: "选择模式",
+    searchConnection: "搜索连接...",
+    searchDatabase: "搜索数据库...",
+    searchSchema: "搜索模式...",
   },
   tableImport: {
     title: "导入表数据",
@@ -2309,6 +2316,9 @@ export default withEnglishFallback({
     configDeleted: "配置已删除",
     noDeployScriptAll: "暂无所选对象的部署脚本",
     saveConfigPrompt: "请输入配置名称:",
+    searchConnection: "搜索连接...",
+    searchDatabase: "搜索数据库...",
+    searchSchema: "搜索模式...",
   },
   schemaDiff: {
     optionsTitle: "比较选项",
@@ -2362,6 +2372,7 @@ export default withEnglishFallback({
   dataCompare: {
     title: "比较数据",
     selectTable: "选择表",
+    searchTable: "搜索表名...",
     sourceTables: "源表",
     targetTable: "目标表",
     searchTables: "搜索表名...",

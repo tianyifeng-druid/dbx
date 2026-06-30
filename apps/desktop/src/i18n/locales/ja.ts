@@ -910,6 +910,7 @@ export default withEnglishFallback({
     copy: "コピー",
     import: "インポート",
     remove: "削除",
+    noResults: "結果なし",
   },
   quickOpen: {
     placeholder: "接続、データベース、テーブル、その他のオブジェクトを検索...",
@@ -1987,6 +1988,12 @@ export default withEnglishFallback({
     editConfig: "設定を編集",
     retry: "リトライ",
     targetTableBusy: "別の転送がすでにターゲットテーブルに書き込み中です: {tables}",
+    selectConnection: "接続を選択",
+    selectDatabase: "データベースを選択",
+    selectSchema: "スキーマを選択",
+    searchConnection: "接続を検索...",
+    searchDatabase: "データベースを検索...",
+    searchSchema: "スキーマを検索...",
   },
   tableImport: {
     title: "テーブルデータをインポート",
@@ -2300,6 +2307,9 @@ export default withEnglishFallback({
     port: "ポート",
     copied: "クリップボードにコピーしました",
     saveConfigPrompt: "設定名を入力してください:",
+    searchConnection: "接続を検索...",
+    searchDatabase: "データベースを検索...",
+    searchSchema: "スキーマを検索...",
   },
   schemaDiff: {
     optionsTitle: "比較オプション",
@@ -2353,6 +2363,7 @@ export default withEnglishFallback({
   dataCompare: {
     title: "データを比較",
     selectTable: "テーブルを選択",
+    searchTable: "テーブルを検索...",
     sourceTables: "ソーステーブル",
     targetTable: "対象テーブル",
     searchTables: "テーブルを検索...",

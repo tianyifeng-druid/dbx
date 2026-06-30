@@ -923,6 +923,7 @@ export default withEnglishFallback({
     sequence: "Sequência",
     package: "Pacote",
     packageBody: "Corpo do Pacote",
+    noResults: "Sem resultados",
   },
   quickOpen: {
     placeholder: "Pesquisar conexões, bancos de dados, tabelas e outros objetos...",
@@ -2000,6 +2001,12 @@ export default withEnglishFallback({
     editConfig: "Editar configuração",
     retry: "Tentar novamente",
     targetTableBusy: "Outra transferência já está gravando na(s) tabela(s) de destino: {tables}",
+    selectConnection: "Selecionar conexão",
+    selectDatabase: "Selecionar banco de dados",
+    selectSchema: "Selecionar schema",
+    searchConnection: "Pesquisar conexões...",
+    searchDatabase: "Pesquisar bancos de dados...",
+    searchSchema: "Pesquisar schemas...",
   },
   tableImport: {
     title: "Importar Dados da Tabela",
@@ -2313,6 +2320,9 @@ export default withEnglishFallback({
     copied: "Copiado para a área de transferência",
     saveConfigPrompt: "Digite o nome da configuração:",
     close: "Fechar",
+    searchConnection: "Pesquisar conexões...",
+    searchDatabase: "Pesquisar bancos de dados...",
+    searchSchema: "Pesquisar schemas...",
   },
   schemaDiff: {
     optionsTitle: "Opções de Comparação",
@@ -2366,6 +2376,7 @@ export default withEnglishFallback({
   dataCompare: {
     title: "Comparar Dados",
     selectTable: "Selecionar tabela",
+    searchTable: "Pesquisar tabelas...",
     sourceTables: "Tabelas de origem",
     targetTable: "Tabela de destino",
     searchTables: "Pesquisar tabelas...",

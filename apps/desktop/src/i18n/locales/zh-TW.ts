@@ -911,6 +911,7 @@ export default withEnglishFallback({
     sequence: "序列",
     package: "套件",
     packageBody: "套件本體",
+    noResults: "無結果",
   },
   quickOpen: {
     placeholder: "搜尋連線、資料庫、資料表和其他物件……",
@@ -1891,6 +1892,12 @@ export default withEnglishFallback({
     editConfig: "編輯配置",
     retry: "重試",
     targetTableBusy: "另一個傳輸正在寫入目標資料表：{tables}",
+    selectConnection: "選擇連線",
+    selectDatabase: "選擇資料庫",
+    selectSchema: "選擇結構描述",
+    searchConnection: "搜尋連線...",
+    searchDatabase: "搜尋資料庫...",
+    searchSchema: "搜尋結構描述...",
   },
   tableImport: {
     title: "匯入資料表資料",
@@ -2204,6 +2211,9 @@ export default withEnglishFallback({
     host: "主機",
     copied: "已複製到剪貼簿",
     close: "關閉",
+    searchConnection: "搜尋連線...",
+    searchDatabase: "搜尋資料庫...",
+    searchSchema: "搜尋結構描述...",
   },
   schemaDiff: {
     optionsTitle: "比較選項",
@@ -2257,6 +2267,7 @@ export default withEnglishFallback({
   dataCompare: {
     title: "比較資料",
     selectTable: "選擇資料表",
+    searchTable: "搜尋資料表……",
     sourceTables: "來源資料表",
     targetTable: "目標資料表",
     searchTables: "搜尋資料表名稱……",

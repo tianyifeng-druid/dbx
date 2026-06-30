@@ -912,6 +912,7 @@ export default {
     sequence: "Sequence",
     package: "Package",
     packageBody: "Package Body",
+    noResults: "No results",
   },
   quickOpen: {
     placeholder: "Search connections, databases, tables, and other objects...",
@@ -1989,6 +1990,12 @@ export default {
     editConfig: "Edit config",
     retry: "Retry",
     targetTableBusy: "Another transfer is already writing target table(s): {tables}",
+    selectConnection: "Select connection",
+    selectDatabase: "Select database",
+    selectSchema: "Select schema",
+    searchConnection: "Search connections...",
+    searchDatabase: "Search databases...",
+    searchSchema: "Search schemas...",
   },
   tableImport: {
     title: "Import Table Data",
@@ -2302,6 +2309,9 @@ export default {
     copied: "Copied to clipboard",
     saveConfigPrompt: "Please enter config name:",
     close: "Close",
+    searchConnection: "Search connections...",
+    searchDatabase: "Search databases...",
+    searchSchema: "Search schemas...",
   },
   schemaDiff: {
     optionsTitle: "Compare Options",
@@ -2355,6 +2365,7 @@ export default {
   dataCompare: {
     title: "Compare Data",
     selectTable: "Select table",
+    searchTable: "Search tables...",
     sourceTables: "Source tables",
     targetTable: "Target table",
     searchTables: "Search tables...",
