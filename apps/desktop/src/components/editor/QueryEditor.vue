@@ -31,7 +31,7 @@ import {
 } from "@/lib/sqlCompletion";
 import { buildElasticsearchCompletionItemsFromContext, getElasticsearchCompletionContext, getElasticsearchCompletionResultValidFor, shouldAutoOpenElasticsearchCompletion, type ElasticsearchCompletionItem } from "@/lib/elasticsearchCompletion";
 import { buildMongoCompletionItemsFromContext, getMongoCompletionContext, getMongoCompletionResultValidFor, shouldAutoOpenMongoCompletion, type MongoCompletionItem } from "@/lib/mongoCompletion";
-import { extractIdentifierAt, isSqlKeyword, matchTable } from "@/lib/sqlNavigation";
+import { extractIdentifierAt, isSqlKeyword, matchTable, splitQualifiedIdentifier } from "@/lib/sqlNavigation";
 import { lineColumnToOffset, parseSqlErrorLocation } from "@/lib/sqlDiagnostics";
 import {
   DBX_TABLE_REFERENCE_MIME,
@@ -2419,11 +2419,14 @@ onMounted(async () => {
           event.preventDefault();
           setTimeout(async () => {
             try {
+              const { qualifier, name: tableNamePart } = splitQualifiedIdentifier(identifier);
+
               // Ensure table cache is populated
+              // Use table name part (not full schema.table) as filter to get better results
               if (cachedTables.length === 0) {
                 cachedTables = usesLocalOnlyCompletionMetadata()
-                  ? connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, identifier, MAX_COMPLETION_TABLES, props.schema)
-                  : await connectionStore.listCompletionTables(props.connectionId!, props.database!, identifier, MAX_COMPLETION_TABLES, props.schema);
+                  ? connectionStore.lookupLocalCompletionTables(props.connectionId!, props.database!, tableNamePart, MAX_COMPLETION_TABLES, props.schema)
+                  : await connectionStore.listCompletionTables(props.connectionId!, props.database!, tableNamePart, MAX_COMPLETION_TABLES, props.schema);
               }
 
               // 1. Check if it's a table name
@@ -2445,21 +2448,18 @@ onMounted(async () => {
                 return rt;
               });
 
-              // Check if identifier has a qualifier (e.g., c.card_name or schema.table)
-              const qualifierMatch = /^(.+)\.(.+)$/.exec(identifier);
-              const qualifier = qualifierMatch ? qualifierMatch[1] : null;
-
-              // 2b. Qualified identifier (schema.table): check against SQL-parsed referenced tables
-              if (qualifierMatch) {
-                const qQualifier = qualifierMatch[1].toLowerCase();
-                const qTableName = qualifierMatch[2].toLowerCase();
-                const matchedRef = referencedTables.find((rt) => rt.name.toLowerCase() === qTableName && rt.schema?.toLowerCase() === qQualifier);
-                if (matchedRef) {
-                  emit("clickTable", matchedRef.schema ? `${matchedRef.schema}.${matchedRef.name}` : matchedRef.name);
+              // 2b. Qualified identifier (schema.table): search referencedTables then cachedTables
+              if (qualifier) {
+                const qQualifier = qualifier.toLowerCase();
+                const qTableName = tableNamePart.toLowerCase();
+                const match = (arr: Array<{ name: string; schema?: string }>) => arr.find((t) => t.name.toLowerCase() === qTableName && t.schema?.toLowerCase() === qQualifier);
+                const found = match(referencedTables) ?? match(cachedTables);
+                if (found) {
+                  emit("clickTable", found.schema ? `${found.schema}.${found.name}` : found.name);
                   return;
                 }
               }
-              const colName = qualifierMatch ? qualifierMatch[2] : identifier;
+              const colName = tableNamePart;
               const colLower = colName.toLowerCase();
 
               if (referencedTables.length === 0) {
