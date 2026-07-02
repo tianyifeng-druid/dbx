@@ -110,6 +110,7 @@ const props = defineProps<{
   formatSqlRequest: { id: number; tabId: string } | null;
   selectedSql: string;
   cursorPos: number;
+  blockDangerousRedisCommands: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -1249,7 +1250,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
     <!-- Redis mode: key browser -->
     <template v-else-if="activeTab.mode === 'redis'">
       <div class="flex-1 min-h-0">
-        <RedisKeyBrowser ref="redisKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :db="Number(activeTab.database)" />
+        <RedisKeyBrowser ref="redisKeyBrowserRef" :key="activeTab.id" :connection-id="activeTab.connectionId" :db="Number(activeTab.database)" :block-dangerous-redis-commands="props.blockDangerousRedisCommands" />
       </div>
     </template>
 

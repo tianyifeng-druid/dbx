@@ -1660,6 +1660,7 @@ onUnmounted(() => {
                     :format-sql-request="formatSqlRequest"
                     :selected-sql="selectedSql"
                     :cursor-pos="cursorPos"
+                    :block-dangerous-redis-commands="blockDangerousRedisCommands"
                     @update:active-output-view="activeOutputView = $event"
                     @fix-with-ai="fixWithAi"
                     @execute="tryExecute($event)"

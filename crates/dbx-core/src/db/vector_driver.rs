@@ -338,26 +338,63 @@ async fn get_chroma_collection_detail(client: &VectorClient, collection: &str) -
 }
 
 fn chroma_get_response_to_rows(body: &Value) -> Vec<Value> {
-    let ids = body.get("ids").and_then(Value::as_array).cloned().unwrap_or_default();
-    let docs = body.get("documents").and_then(Value::as_array).cloned().unwrap_or_default();
-    let metas = body.get("metadatas").and_then(Value::as_array).cloned().unwrap_or_default();
+    let flatten = |key: &str| -> Vec<Value> {
+        let raw = body.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+        let is_nested = raw.first().and_then(|v| v.as_array()).is_some();
+        if is_nested {
+            raw.iter().flat_map(|v| v.as_array().cloned().unwrap_or_default()).collect()
+        } else {
+            raw
+        }
+    };
+
+    let ids = flatten("ids");
+    let documents = flatten("documents");
+    let metadatas = flatten("metadatas");
+    let distances = flatten("distances");
 
     ids.into_iter()
         .enumerate()
         .map(|(i, id_val)| {
             let mut row = serde_json::Map::new();
             row.insert("id".to_string(), id_val);
-            if let Some(doc) = docs.get(i) {
+            if let Some(doc) = documents.get(i) {
                 row.insert("document".to_string(), doc.clone());
             }
-            if let Some(Value::Object(meta_obj)) = metas.get(i) {
+            if let Some(Value::Object(meta_obj)) = metadatas.get(i) {
                 for (k, v) in meta_obj {
                     row.insert(k.clone(), v.clone());
                 }
             }
+            if let Some(dist) = distances.get(i) {
+                row.insert("distance".to_string(), dist.clone());
+            }
             Value::Object(row)
         })
         .collect()
+}
+
+fn weaviate_graphql_to_rows(body: &Value) -> Option<Vec<Value>> {
+    let get_obj = body.pointer("/data/Get")?.as_object()?;
+    let (_class_name, items) = get_obj.iter().next()?;
+    let items = items.as_array()?;
+    Some(
+        items
+            .iter()
+            .map(|item| {
+                let mut obj = match item {
+                    Value::Object(m) => m.clone(),
+                    _ => return item.clone(),
+                };
+                if let Some(Value::Object(additional)) = obj.remove("_additional") {
+                    for (k, v) in additional {
+                        obj.entry(k).or_insert(v);
+                    }
+                }
+                Value::Object(obj)
+            })
+            .collect(),
+    )
 }
 
 fn weaviate_collection_names_from_schema(body: &Value) -> Vec<String> {
@@ -568,6 +605,10 @@ fn json_to_query_result(status: u16, body: Value, start: Instant) -> QueryResult
     {
         let rows = chroma_get_response_to_rows(&body);
         return values_to_query_result(rows, start);
+    }
+    // Weaviate GraphQL search response
+    if let Some(items) = weaviate_graphql_to_rows(&body) {
+        return values_to_query_result(items, start);
     }
     QueryResult {
         columns: vec!["status".to_string(), "response".to_string()],
