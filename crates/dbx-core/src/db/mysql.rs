@@ -218,7 +218,7 @@ fn mysql_bytes_to_json(bytes: Vec<u8>, column: &mysql_async::Column) -> serde_js
 /// Map a MySQL column to a user-facing type name for the result-grid header.
 /// Returns the bare lowercase type name (no length/precision/signedness), which
 /// is enough for display; unknown variants fall back to a lowercased debug name.
-fn mysql_column_type_name(ty: ColumnType) -> String {
+pub(crate) fn mysql_column_type_name(ty: ColumnType) -> String {
     use mysql_async::consts::ColumnType::*;
     match ty {
         MYSQL_TYPE_TINY => "tinyint",
@@ -251,7 +251,7 @@ fn mysql_column_type_name(ty: ColumnType) -> String {
     .to_string()
 }
 
-fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value {
+pub(crate) fn mysql_value_to_json(row: &mysql_async::Row, idx: usize) -> serde_json::Value {
     let Some(column) = row.columns_ref().get(idx) else {
         return serde_json::Value::Null;
     };
@@ -2180,6 +2180,19 @@ async fn execute_result_set_with_text_protocol_on_conn(
     start: Instant,
 ) -> Result<QueryResult, String> {
     let mut result = conn.query_iter(sql).await.map_err(|e| e.to_string())?;
+    if !advance_to_result_set_with_columns(&mut result).await? {
+        return Ok(QueryResult {
+            columns: vec![],
+            column_types: Vec::new(),
+            column_sortables: vec![],
+            rows: vec![],
+            affected_rows: result.affected_rows(),
+            execution_time_ms: start.elapsed().as_millis(),
+            truncated: false,
+            session_id: None,
+            has_more: false,
+        });
+    }
     let columns: Vec<String> = result.columns_ref().iter().map(|c| c.name_str().to_string()).collect();
     let column_types: Vec<String> =
         result.columns_ref().iter().map(|c| mysql_column_type_name(c.column_type())).collect();
@@ -2238,6 +2251,18 @@ async fn execute_result_set_with_text_protocol_on_conn(
         session_id: None,
         has_more: false,
     })
+}
+
+async fn advance_to_result_set_with_columns(
+    result: &mut mysql_async::QueryResult<'_, '_, mysql_async::TextProtocol>,
+) -> Result<bool, String> {
+    while result.columns_ref().is_empty() {
+        if result.is_empty() {
+            return Ok(false);
+        }
+        let _: Vec<mysql_async::Row> = result.collect().await.map_err(|e| e.to_string())?;
+    }
+    Ok(!result.columns_ref().is_empty())
 }
 
 async fn execute_result_set_with_prepared_protocol_on_conn(
@@ -2502,7 +2527,7 @@ fn prefers_text_protocol_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
 }
 
 fn is_result_set_query(sql: &str, dialect: MySqlQueryDialect) -> bool {
-    starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH"])
+    starts_with_executable_sql_keyword(sql, &["SELECT", "SHOW", "DESCRIBE", "EXPLAIN", "WITH", "CALL"])
         || dialect.supports_admin_show_results && is_admin_show_query(sql)
 }
 
@@ -2594,7 +2619,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
     let sql = format!(
         "SELECT INDEX_NAME, GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX) AS columns, \
          MIN(NON_UNIQUE) = 0 AS is_unique, INDEX_NAME = 'PRIMARY' AS is_primary, \
-         INDEX_TYPE \
+         INDEX_TYPE, MAX(NULLIF(INDEX_COMMENT, '')) AS INDEX_COMMENT \
          FROM information_schema.STATISTICS \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
          GROUP BY INDEX_NAME, INDEX_TYPE \
@@ -2618,7 +2643,7 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                 filter: None,
                 index_type: Some(get_str_by_name(row, "INDEX_TYPE")),
                 included_columns: None,
-                comment: None,
+                comment: get_opt_str(row, "INDEX_COMMENT").filter(|value| !value.is_empty()),
             }
         })
         .collect())
@@ -3011,6 +3036,14 @@ mod tests {
     #[test]
     fn mysql_desc_queries_are_treated_as_result_sets() {
         assert!(is_result_set_query("DESC users", MySqlQueryDialect::default()));
+    }
+
+    #[test]
+    fn mysql_call_queries_are_treated_as_text_result_sets() {
+        let dialect = MySqlQueryDialect::default();
+
+        assert!(is_result_set_query("CALL proc_test1()", dialect));
+        assert!(prefers_text_protocol_query("CALL proc_test1()", dialect));
     }
 
     #[test]

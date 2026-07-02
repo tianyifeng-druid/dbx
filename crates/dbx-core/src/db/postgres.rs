@@ -304,7 +304,7 @@ fn format_pg_timestamptz(value: DateTime<Local>) -> String {
     value.to_rfc3339()
 }
 
-fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value {
+pub(crate) fn pg_value_to_json(row: &Row, idx: usize, type_name: &str) -> serde_json::Value {
     let upper = type_name.to_uppercase();
 
     if upper == "BYTEA" {
@@ -1652,17 +1652,30 @@ async fn postgres_proc_has_prokind(client: &deadpool_postgres::Client) -> Result
     Ok(row.get(0))
 }
 
+async fn list_objects_rows(
+    client: &deadpool_postgres::Client,
+    schema: &str,
+    include_timestamps: bool,
+    has_proc_prokind: bool,
+) -> Result<Vec<Row>, String> {
+    let sql = list_objects_sql(include_timestamps, has_proc_prokind);
+    let stmt = client.prepare_cached(&sql).await.map_err(|e| e.to_string())?;
+    client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())
+}
+
 pub async fn list_objects(pool: &Pool, schema: &str) -> Result<Vec<ObjectInfo>, String> {
     let client = checkout_postgres_client(pool, None, super::connection_timeout()).await?;
     let has_proc_prokind = postgres_proc_has_prokind(&client).await?;
-    let sql = list_objects_sql(true, has_proc_prokind);
-    let stmt = client.prepare_cached(&sql).await.map_err(|e| e.to_string())?;
-    let rows = match client.query(&stmt, &[&schema]).await {
+    let rows = match list_objects_rows(&client, schema, true, has_proc_prokind).await {
         Ok(rows) => rows,
-        Err(_) => {
-            let fallback_sql = list_objects_sql(false, has_proc_prokind);
-            let stmt = client.prepare_cached(&fallback_sql).await.map_err(|e| e.to_string())?;
-            client.query(&stmt, &[&schema]).await.map_err(|e| e.to_string())?
+        Err(primary_error) => {
+            log::debug!("[postgres][list_objects:timestamp-fallback] primary_error={}", primary_error);
+            match list_objects_rows(&client, schema, false, has_proc_prokind).await {
+                Ok(rows) => rows,
+                Err(fallback_error) => {
+                    return Err(format!("{primary_error}; timestamp fallback failed: {fallback_error}"));
+                }
+            }
         }
     };
 

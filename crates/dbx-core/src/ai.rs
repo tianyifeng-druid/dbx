@@ -466,13 +466,33 @@ fn responses_token_usage(event: &serde_json::Value) -> Option<TokenUsage> {
     Some(TokenUsage { input_tokens: input as u32, output_tokens: output as u32 })
 }
 
+fn is_openai_api_endpoint(endpoint: &str) -> bool {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.eq_ignore_ascii_case("api.openai.com")))
+        .unwrap_or(false)
+}
+
 fn is_openai_api_config(config: &AiConfig) -> bool {
-    matches!(config.provider, AiProvider::Openai) || config.endpoint.to_ascii_lowercase().contains("api.openai.com")
+    // OpenAI provider can be routed through a custom proxy while still requiring OpenAI request semantics.
+    matches!(config.provider, AiProvider::Openai) || is_openai_api_endpoint(&config.endpoint)
 }
 
 fn is_openai_reasoning_model(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
     model.starts_with("gpt-5") || model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4")
+}
+
+fn uses_openai_max_completion_tokens(config: &AiConfig) -> bool {
+    is_openai_api_config(config) && is_openai_reasoning_model(&config.model)
+}
+
+fn set_chat_completion_token_limit(body: &mut serde_json::Value, config: &AiConfig, max_tokens: u32) {
+    if uses_openai_max_completion_tokens(config) {
+        body["max_completion_tokens"] = json!(max_tokens);
+    } else {
+        body["max_tokens"] = json!(max_tokens);
+    }
 }
 
 /// Kimi K2.5+ models (including K2.7-Code) require fixed sampling parameters:
@@ -497,7 +517,7 @@ fn is_kimi_model(model: &str) -> bool {
 }
 
 pub fn supports_temperature(config: &AiConfig) -> bool {
-    !(is_kimi_model(&config.model) || is_openai_api_config(config) && is_openai_reasoning_model(&config.model))
+    !(is_kimi_model(&config.model) || uses_openai_max_completion_tokens(config))
 }
 
 fn add_temperature_if_supported_for_config(body: &mut serde_json::Value, config: &AiConfig, temperature: Option<f32>) {
@@ -893,8 +913,8 @@ pub async fn call_openai_compatible(client: &reqwest::Client, request: AiComplet
     let mut body_obj = json!({
         "model": request.config.model,
         "messages": messages,
-        "max_tokens": request.max_tokens.unwrap_or(2048),
     });
+    set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
     add_temperature_if_supported(&mut body_obj, &request);
     if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
         body_obj["extra_body"] = json!({
@@ -1150,12 +1170,13 @@ pub async fn test_connection_core(config: &AiConfig) -> Result<AiTestConnectionR
                 })
             } else {
                 let messages = vec![json!({ "role": "user", "content": TEST_PROMPT })];
-                json!({
+                let mut body = json!({
                     "model": &model,
                     "messages": messages,
-                    "max_tokens": 16,
                     "stream": true,
-                })
+                });
+                set_chat_completion_token_limit(&mut body, config, 16);
+                body
             };
             add_temperature_if_supported_for_config(&mut body_obj, config, Some(0.0));
             if config.api_style != AiApiStyle::Responses && !config.enable_thinking && !is_kimi_model(&config.model) {
@@ -1411,9 +1432,9 @@ async fn stream_openai(
     let mut body_obj = json!({
         "model": request.config.model,
         "messages": messages,
-        "max_tokens": request.max_tokens.unwrap_or(2048),
         "stream": true,
     });
+    set_chat_completion_token_limit(&mut body_obj, &request.config, request.max_tokens.unwrap_or(2048));
     add_temperature_if_supported(&mut body_obj, request);
     if !request.config.enable_thinking && !is_kimi_model(&request.config.model) {
         body_obj["extra_body"] = json!({
@@ -1692,7 +1713,22 @@ impl StreamingToolCallAccumulator {
         match event {
             StreamToolEvent::Chunk(chunk) => on_chunk(chunk),
             StreamToolEvent::ToolCallStart { index, id, name } => {
-                self.calls.insert(index, PartialToolCall { id, name, arguments: String::new() });
+                // Merge with any existing entry for this index instead of
+                // overwriting it. Some OpenAI-compatible providers (e.g. GLM)
+                // re-send `id` (as an empty string) or omit `name` on
+                // subsequent delta chunks; a blind insert would wipe a
+                // previously-correct name and reset accumulated arguments,
+                // producing "Unknown tool:" errors.
+                if let Some(existing) = self.calls.get_mut(&index) {
+                    if !id.is_empty() {
+                        existing.id = id;
+                    }
+                    if !name.is_empty() {
+                        existing.name = name;
+                    }
+                } else {
+                    self.calls.insert(index, PartialToolCall { id, name, arguments: String::new() });
+                }
                 if !self.ordered_indices.contains(&index) {
                     self.ordered_indices.push(index);
                 }
@@ -1953,12 +1989,12 @@ async fn stream_openai_with_tools(
     let mut body = json!({
         "model": request.config.model,
         "messages": messages,
-        "max_tokens": request.max_tokens.unwrap_or(4096),
         "tools": tool_json,
         "tool_choice": "auto",
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+    set_chat_completion_token_limit(&mut body, &request.config, request.max_tokens.unwrap_or(4096));
     add_temperature_if_supported(&mut body, request);
 
     let res = client
@@ -2025,8 +2061,11 @@ async fn stream_openai_with_tools(
                         if let Some(tool_calls) = event["choices"].get(0).and_then(|c| c["delta"]["tool_calls"].as_array()) {
                             for tc in tool_calls {
                                 let idx = tc["index"].as_u64().unwrap_or(0) as u32;
-                                // First chunk for this tool call has id and name
-                                if let Some(id) = tc["id"].as_str() {
+                                // The first delta carries the tool call id and
+                                // function name. Some OpenAI-compatible providers
+                                // (e.g. GLM) send id="" on subsequent deltas, so
+                                // only a non-empty id marks a genuine start.
+                                if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
                                     let name = tc["function"]["name"].as_str().unwrap_or_default().to_string();
                                     on_event(StreamToolEvent::ToolCallStart { index: idx, id: id.to_string(), name });
                                 }
@@ -2442,11 +2481,43 @@ mod tests {
         claude_headers, claude_system_prompt, drain_next_stream_line, emit_responses_function_call_item, gemini_text,
         is_kimi_model, openai_response_text, openai_stream_reasoning, openai_stream_text, parse_model_list_response,
         resolve_endpoint, resolve_model_list_endpoint, responses_function_tool, responses_max_output_tokens,
-        responses_stream_text, responses_text, responses_token_usage, stream_data_payload, supports_temperature,
-        temperature_value, uses_anthropic_messages_api, validate_config, AiApiStyle, AiAuthMethod, AiConfig, AiMessage,
-        AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent, StreamingToolCallAccumulator, ToolCallRef,
-        AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
+        responses_stream_text, responses_text, responses_token_usage, set_chat_completion_token_limit,
+        stream_data_payload, supports_temperature, temperature_value, uses_anthropic_messages_api, validate_config,
+        AiApiStyle, AiAuthMethod, AiConfig, AiMessage, AiModelInfo, AiProvider, AiReasoningLevel, StreamToolEvent,
+        StreamingToolCallAccumulator, ToolCallRef, AUTHORIZATION, CLAUDE_DEFAULT_SYSTEM, TEST_PROMPT,
     };
+
+    /// Reproduce the "Unknown tool:" bug: some OpenAI-compatible providers
+    /// (e.g. GLM via proxy) re-send the `id` field in every tool-call delta.
+    /// The second delta carries `id` but omits `function.name`, so the OpenAI
+    /// parser emits a second ToolCallStart with an empty name. The
+    /// accumulator's `insert` then overwrites the previously-correct name.
+    #[test]
+    fn accumulator_preserves_name_when_provider_resends_id() {
+        let mut acc = StreamingToolCallAccumulator::new();
+        let noop = |_chunk| {};
+
+        // First chunk: id + name present (standard OpenAI first delta)
+        acc.process(
+            StreamToolEvent::ToolCallStart { index: 0, id: "call_1".to_string(), name: "get_columns".to_string() },
+            &noop,
+        );
+        acc.process(StreamToolEvent::ToolCallDelta { index: 0, fragment: "{\"table\":".to_string() }, &noop);
+
+        // Second chunk: provider re-sends `id` but omits `function.name`.
+        // The OpenAI parser sees `id` is Some and emits ToolCallStart with
+        // name = "" (from unwrap_or_default()).
+        acc.process(StreamToolEvent::ToolCallStart { index: 0, id: "call_1".to_string(), name: String::new() }, &noop);
+        acc.process(StreamToolEvent::ToolCallDelta { index: 0, fragment: "\"record_trip_id_t\"}".to_string() }, &noop);
+
+        let calls = acc.finalize();
+        assert_eq!(calls.len(), 1, "expected exactly one accumulated tool call");
+        assert_eq!(
+            calls[0].name, "get_columns",
+            "tool name was wiped to empty by a re-sent ToolCallStart — this is the \"Unknown tool:\" bug"
+        );
+        assert_eq!(calls[0].arguments["table"], "record_trip_id_t", "arguments were reset by a re-sent ToolCallStart");
+    }
 
     #[test]
     fn stream_line_decoder_preserves_split_multibyte_utf8() {
@@ -3040,6 +3111,10 @@ mod tests {
         config.model = "gpt-4o".to_string();
         assert!(supports_temperature(&config));
 
+        config.endpoint = "http://localhost:11434/v1".to_string();
+        config.model = "gpt-5-proxy".to_string();
+        assert!(!supports_temperature(&config));
+
         config.provider = AiProvider::OpenaiCompatible;
         config.endpoint = "http://localhost:11434/v1".to_string();
         config.model = "gpt-5-local".to_string();
@@ -3079,6 +3154,71 @@ mod tests {
         config.model = "kimi-k2.4".to_string();
         assert!(supports_temperature(&config));
         assert!(!is_kimi_model(&config.model));
+    }
+
+    #[test]
+    fn uses_max_completion_tokens_for_openai_reasoning_chat_completions() {
+        let mut config = AiConfig {
+            provider: AiProvider::Openai,
+            api_key: "key".to_string(),
+            auth_method: AiAuthMethod::Bearer,
+            endpoint: "https://api.openai.com/v1/chat/completions".to_string(),
+            model: "gpt-5.5".to_string(),
+            api_style: AiApiStyle::Completions,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            enable_thinking: true,
+            reasoning_level: AiReasoningLevel::Default,
+            context_window: None,
+            codex_cli_path: None,
+            codex_cli_env: Default::default(),
+        };
+
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, 1024);
+
+        assert_eq!(body.get("max_completion_tokens"), Some(&serde_json::json!(1024)));
+        assert!(body.get("max_tokens").is_none());
+
+        config.model = "gpt-4o".to_string();
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, 1024);
+
+        assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(1024)));
+        assert!(body.get("max_completion_tokens").is_none());
+
+        config.endpoint = "http://localhost:11434/v1".to_string();
+        config.model = "gpt-5-proxy".to_string();
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, 1024);
+
+        assert_eq!(body.get("max_completion_tokens"), Some(&serde_json::json!(1024)));
+        assert!(body.get("max_tokens").is_none());
+
+        config.provider = AiProvider::OpenaiCompatible;
+        config.endpoint = "http://localhost:11434/v1".to_string();
+        config.model = "gpt-5-local".to_string();
+        let mut body = serde_json::json!({
+            "model": &config.model,
+            "messages": [{ "role": "user", "content": TEST_PROMPT }],
+            "stream": true,
+        });
+        set_chat_completion_token_limit(&mut body, &config, 1024);
+
+        assert_eq!(body.get("max_tokens"), Some(&serde_json::json!(1024)));
+        assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]

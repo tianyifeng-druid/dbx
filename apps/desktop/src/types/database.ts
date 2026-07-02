@@ -51,6 +51,7 @@ export type DatabaseType =
   | "bigquery"
   | "kylin"
   | "sundb"
+  | "oscar"
   | "tdengine"
   | "xugu"
   | "iotdb"
@@ -447,17 +448,25 @@ export interface SqlTableReference {
   schema?: string | null;
   alias?: string | null;
   span: SqlTextSpan;
+  scope_id?: number;
 }
 
 export interface SqlColumnReference {
   name: string;
   qualifier?: string | null;
   span: SqlTextSpan;
+  scope_id?: number;
+}
+
+export interface SqlReferenceScope {
+  id: number;
+  parent_id?: number | null;
 }
 
 export interface SqlReferenceAnalysis {
   tables: SqlTableReference[];
   columns: SqlColumnReference[];
+  scopes?: SqlReferenceScope[];
 }
 
 export type TreeNodeType =
@@ -536,6 +545,7 @@ export interface TreeNode {
   linkedCatalog?: string;
   linkedSchema?: string;
   mqTenant?: string;
+  mqInitialTab?: "topics";
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   schema?: string;
@@ -629,9 +639,12 @@ export interface QueryTab {
   explainExecutionId?: string;
   mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users";
   mqTenant?: string;
+  mqInitialTab?: "topics";
   nacosNamespace?: string;
   nacosNamespaceName?: string;
   structureTableName?: string;
+  structureInitialTab?: TableInfoTab;
+  structureInitialTabRequestId?: number;
   structureDraft?: TableStructureEditorDraft;
   objectBrowser?: {
     schema?: string;
@@ -674,6 +687,13 @@ export interface QueryTab {
   resultEvicted?: boolean;
   whereInput?: string;
   previewSql?: string;
+  /** Whether to use auto-commit mode (default true). When false, multiple statements are
+   *  wrapped in a single transaction. */
+  autoCommit?: boolean;
+  /** Session ID for an active manual transaction, set after beginManualTransaction */
+  txnSessionId?: string;
+  /** Set to true when a manual transaction was auto-rolled back due to inactivity */
+  txnAutoRolledBack?: boolean;
 }
 
 export interface SavedSqlFolder {

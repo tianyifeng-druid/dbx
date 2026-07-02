@@ -5,9 +5,12 @@ import { Search, X, ListFilter, Crosshair, Server, Database, FolderTree, Table2,
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useQueryStore } from "@/stores/queryStore";
 import { useSettingsStore } from "@/stores/settingsStore";
+import { useToast } from "@/composables/useToast";
 import type { TreeNode, TreeNodeType } from "@/types/database";
 import { filterSidebarSearchRootsByConnectionState, filterSidebarTree } from "@/lib/sidebarSearchTree";
 import { isCancelSearchShortcut } from "@/lib/keyboardShortcuts";
+import { copyNameForTreeNode } from "@/lib/treeNodeClick";
+import { copyToClipboard, eventTargetAllowsAppClipboardShortcut } from "@/lib/clipboard";
 import { isEditableSidebarTypeSearchTarget, sidebarTypeSearchNextQuery } from "@/lib/sidebarTypeSearch";
 import { usesTreeSchemaMode } from "@/lib/databaseFeatureSupport";
 import { connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection } from "@/lib/jdbcDialect";
@@ -24,9 +27,11 @@ const { t } = useI18n();
 const store = useConnectionStore();
 const queryStore = useQueryStore();
 const settingsStore = useSettingsStore();
+const { toast } = useToast();
 const searchQuery = ref("");
 const deferredSearchQuery = ref("");
 const searchInputRef = ref<HTMLInputElement>();
+const rootRef = ref<HTMLElement>();
 const pointerInsideTree = ref(false);
 const treeScrollerRef = ref<InstanceType<typeof RecycleScroller> | null>(null);
 const plainTreeScrollerRef = ref<HTMLElement | null>(null);
@@ -442,9 +447,12 @@ function clearSidebarSelection() {
 
 async function createNewGroup() {
   const groupId = store.createConnectionGroup(t("connectionGroup.newGroupDefault"));
+  await startRenamingCreatedGroup(groupId);
+}
+
+async function startRenamingCreatedGroup(groupId: string) {
   pendingRenameGroupId.value = groupId;
   store.selectedTreeNodeId = groupId;
-
   if (isFiltering.value) {
     searchQuery.value = "";
     deferredSearchQuery.value = "";
@@ -763,7 +771,25 @@ function focusSearchAtEnd() {
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
-  if (!pointerInsideTree.value || event.defaultPrevented || isEditableSidebarTypeSearchTarget(event.target)) return;
+  if (event.defaultPrevented) return;
+  if (sidebarShortcutTargetIsActive(event.target)) {
+    if (eventTargetAllowsAppClipboardShortcut(event, "c")) {
+      if (copySelectedSidebarNames()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+    if (eventTargetAllowsAppClipboardShortcut(event, "v")) {
+      if (requestSelectedSidebarPasteTable()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      return;
+    }
+  }
+
+  if (!pointerInsideTree.value || isEditableSidebarTypeSearchTarget(event.target)) return;
   if (isCancelSearchShortcut(event)) {
     if (!searchQuery.value) return;
     event.preventDefault();
@@ -776,6 +802,49 @@ function onWindowKeydown(event: KeyboardEvent) {
   event.preventDefault();
   searchQuery.value = nextQuery;
   focusSearchAtEnd();
+}
+
+function sidebarShortcutTargetIsActive(target: EventTarget | null): boolean {
+  const root = rootRef.value;
+  if (!root) return false;
+  if (target instanceof Node && root.contains(target)) return true;
+  const active = document.activeElement;
+  return pointerInsideTree.value && (!active || active === document.body || root.contains(active));
+}
+
+function selectedSidebarNodesInVisibleOrder(): TreeNode[] {
+  const selectedIds = new Set(store.selectedTreeNodeIds);
+  return visibleNodes.value.filter((node) => selectedIds.has(node.id));
+}
+
+function copySelectedSidebarNames(): boolean {
+  const nodes = selectedSidebarNodesInVisibleOrder();
+  if (nodes.length === 0) return false;
+  const tableNodes = nodes.filter((node) => node.type === "table" && !!node.connectionId && !!node.database);
+  store.treeClipboard =
+    tableNodes.length > 0
+      ? {
+          kind: "table-copy",
+          tables: tableNodes.map((node) => ({
+            connectionId: node.connectionId!,
+            database: node.database!,
+            schema: node.schema,
+            tableName: node.label,
+          })),
+        }
+      : null;
+  copyToClipboard(nodes.map(copyNameForTreeNode).join("\n"))
+    .then(() => toast(t("connection.copied"), 2000))
+    .catch((e: any) => toast(t("grid.copyFailed", { message: e?.message || String(e) }), 5000));
+  return true;
+}
+
+function requestSelectedSidebarPasteTable(): boolean {
+  const clipboard = store.treeClipboard;
+  const selectedNodeId = store.selectedTreeNodeId;
+  if (clipboard?.kind !== "table-copy" || clipboard.tables.length === 0 || !selectedNodeId) return false;
+  window.dispatchEvent(new CustomEvent("dbx:sidebar-request-paste-table", { detail: { nodeId: selectedNodeId } }));
+  return true;
 }
 
 onMounted(() => {
@@ -794,7 +863,7 @@ defineExpose({ focusSearch, createNewGroup });
 </script>
 
 <template>
-  <div class="h-full min-h-0 flex flex-col text-sm select-none" @pointerenter="pointerInsideTree = true" @pointerleave="pointerInsideTree = false">
+  <div ref="rootRef" class="h-full min-h-0 flex flex-col text-sm select-none" @pointerenter="pointerInsideTree = true" @pointerleave="pointerInsideTree = false">
     <div class="sticky top-0 z-10 bg-background px-2 py-1">
       <div class="relative flex items-center gap-1">
         <div class="relative flex-1">
@@ -855,7 +924,16 @@ defineExpose({ focusSearch, createNewGroup });
         flow-mode
       >
         <template #default="{ item }">
-          <TreeItem :node="item.node" :depth="item.depth" :drag-disabled="isFiltering" :pending-rename="pendingRenameGroupId === item.node.id" :highlighted="highlightedNodeId === item.node.id" @search-toggle="onSearchToggle" @rename-started="pendingRenameGroupId = null" />
+          <TreeItem
+            :node="item.node"
+            :depth="item.depth"
+            :drag-disabled="isFiltering"
+            :pending-rename="pendingRenameGroupId === item.node.id"
+            :highlighted="highlightedNodeId === item.node.id"
+            @search-toggle="onSearchToggle"
+            @rename-started="pendingRenameGroupId = null"
+            @group-created="startRenamingCreatedGroup"
+          />
         </template>
       </RecycleScroller>
       <div v-if="stickyNode" class="sticky-database-header pointer-events-auto absolute inset-x-0 top-0 z-[5] border-b border-border/60" :style="stickyHeaderStyle">
@@ -877,6 +955,7 @@ defineExpose({ focusSearch, createNewGroup });
           :highlighted="highlightedNodeId === item.id"
           @search-toggle="onSearchToggle"
           @rename-started="pendingRenameGroupId = null"
+          @group-created="startRenamingCreatedGroup"
         />
       </div>
       <div v-if="hasSidebarVerticalOverflow" ref="sidebarScrollbarTrackRef" class="sidebar-tree-scrollbar" :class="{ 'sidebar-tree-scrollbar--scrolling': isScrollingSidebar, 'sidebar-tree-scrollbar--dragging': isDraggingSidebarScrollbar }" @pointerdown="onSidebarScrollbarTrackPointerDown">

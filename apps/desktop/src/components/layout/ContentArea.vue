@@ -49,7 +49,7 @@ const ExplainPlanViewer = defineAsyncComponent(() => import("@/components/explai
 const QueryChart = defineAsyncComponent(() => import("@/components/chart/QueryChart.vue"));
 import { useQueryStore } from "@/stores/queryStore";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { TABLE_FONT_SIZE_DEFAULT, TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
+import { TABLE_FONT_SIZE_MAX, TABLE_FONT_SIZE_MIN, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { canCancelQueryExecution, queryExecutionLabelKey } from "@/lib/queryExecutionState";
 import { databaseDisplayNameForTab, executionSummaryItems, nextExecutionSummaryView, resultGridCacheKey, resultRunItems, tabularResultItems } from "@/lib/tabPresentation";
@@ -137,6 +137,7 @@ const emit = defineEmits<{
   structureEditorSaved: [commentChanged: boolean];
   structureEditorClose: [];
   openSettings: [initialTab?: string, initialSection?: string];
+  openConnectionSettings: [connectionId: string, initialTab: "advanced"];
 }>();
 
 const { t } = useI18n();
@@ -176,8 +177,12 @@ const columnVisibilitySearch = ref("");
 const columnVisibilityOptions = computed(() => dataGridRef.value?.filteredColumnVisibilityOptions(columnVisibilitySearch.value) ?? []);
 const dataGridRenderMode = computed(() => settingsStore.editorSettings.dataGridRenderMode);
 const tableFontSize = computed(() => settingsStore.editorSettings.tableFontSize);
-const dataGridViewOptionsActive = computed(() => dataGridRef.value?.nullColumnsHidden || dataGridRef.value?.multiRowTranspose || dataGridRenderMode.value === "dom" || tableFontSize.value !== TABLE_FONT_SIZE_DEFAULT);
 const redisKeyBrowserRef = ref<SearchableBrowserHandle>();
+
+function isQueryTimeoutError(message: string): boolean {
+  const lower = message.toLowerCase();
+  return lower.includes("query timed out") || lower.includes("查询超时");
+}
 const etcdKeyBrowserRef = ref<SearchableBrowserHandle>();
 const zookeeperKeyBrowserRef = ref<SearchableBrowserHandle>();
 const objectBrowserRef = ref<SearchableBrowserHandle>();
@@ -779,16 +784,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 </Button>
                 <Popover v-if="activeOutputView === 'result' && activeTab.result">
                   <PopoverTrigger as-child>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                      :class="{
-                        'bg-accent text-foreground': dataGridViewOptionsActive,
-                      }"
-                      :title="t('grid.viewOptions')"
-                      :aria-label="t('grid.viewOptions')"
-                    >
+                    <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                       <Wrench class="h-4 w-4" />
                     </Button>
                   </PopoverTrigger>
@@ -977,6 +973,10 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template v-if="activeTab.result?.columns.includes('Error')" #error-actions="{ errorMessage }">
+                  <Button v-if="activeTab.connectionId && isQueryTimeoutError(String(errorMessage))" variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('openConnectionSettings', activeTab.connectionId, 'advanced')">
+                    <Wrench class="h-3.5 w-3.5" />
+                    {{ t("editor.changeQueryTimeout") }}
+                  </Button>
                   <Button variant="outline" size="sm" class="h-7 gap-1.5 px-2.5 text-xs" @click="emit('fixWithAi', String(errorMessage))">
                     <Bot class="h-3.5 w-3.5" />
                     {{ t("ai.fixWithAi") }}
@@ -1098,16 +1098,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
           </DropdownMenu>
           <Popover v-if="activeTab.result?.columns.length">
             <PopoverTrigger as-child>
-              <Button
-                variant="ghost"
-                size="icon"
-                class="h-6 w-7 shrink-0 text-foreground hover:bg-accent"
-                :class="{
-                  'bg-accent text-foreground': dataGridViewOptionsActive,
-                }"
-                :title="t('grid.viewOptions')"
-                :aria-label="t('grid.viewOptions')"
-              >
+              <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                 <Wrench class="h-4 w-4" />
               </Button>
             </PopoverTrigger>
@@ -1299,7 +1290,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 
     <template v-else-if="activeTab.mode === 'mq'">
       <div class="flex-1 min-h-0">
-        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :read-only="activeConnection?.read_only ?? false" />
+        <MqAdminConsole :key="activeTab.id" :connection-id="activeTab.connectionId" :initial-tenant="activeTab.mqTenant" :initial-tab="activeTab.mqInitialTab" :read-only="activeConnection?.read_only ?? false" />
       </div>
     </template>
 
@@ -1311,15 +1302,17 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
 
     <!-- Objects mode: virtualized database object browser -->
     <template v-else-if="activeTab.mode === 'objects' && activeConnection">
-      <ObjectBrowser
-        ref="objectBrowserRef"
-        :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
-        :connection="activeConnection"
-        :database="activeTab.database"
-        :schema="activeTab.objectBrowser?.schema"
-        @open-table="emit('openObjectTable', $event)"
-        @schema-change="emit('objectSchemaChange', $event)"
-      />
+      <div class="min-w-0 flex-1 min-h-0">
+        <ObjectBrowser
+          ref="objectBrowserRef"
+          :key="`${activeTab.id}-${activeTab.objectBrowser?.schema || ''}`"
+          :connection="activeConnection"
+          :database="activeTab.database"
+          :schema="activeTab.objectBrowser?.schema"
+          @open-table="emit('openObjectTable', $event)"
+          @schema-change="emit('objectSchemaChange', $event)"
+        />
+      </div>
     </template>
 
     <!-- Structure mode: table structure editor -->
@@ -1330,6 +1323,8 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
         :database="activeTab.database"
         :schema="activeTab.schema"
         :table-name="activeTab.structureTableName || ''"
+        :initial-tab="activeTab.structureInitialTab"
+        :initial-tab-request-id="activeTab.structureInitialTabRequestId"
         :draft="activeTab.structureDraft"
         @update:draft="(draft) => (activeTab.structureDraft = draft)"
         @saved="(commentChanged) => emit('structureEditorSaved', commentChanged)"

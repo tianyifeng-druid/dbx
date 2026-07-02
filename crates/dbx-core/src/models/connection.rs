@@ -312,6 +312,7 @@ pub enum DatabaseType {
     Bigquery,
     Kylin,
     Sundb,
+    Oscar,
     Tdengine,
     Xugu,
     Iotdb,
@@ -642,6 +643,7 @@ impl ConnectionConfig {
             DatabaseType::Kingbase | DatabaseType::Vastbase => Some("postgres"),
             DatabaseType::Highgo => Some("highgo"),
             DatabaseType::Yashandb => Some("yasdb"),
+            DatabaseType::Oscar => Some("osrdb"),
             DatabaseType::Firebird => Some("employee"),
             DatabaseType::H2 => Some("test"),
             DatabaseType::Informix => Some("sysmaster"),
@@ -796,6 +798,7 @@ impl ConnectionConfig {
             DatabaseType::Bigquery => format!("bigquery://{host}/{db_part}"),
             DatabaseType::Kylin => format!("kylin://{host}:{port}{db_part}"),
             DatabaseType::Sundb => format!("sundb://{host}:{port}{db_part}"),
+            DatabaseType::Oscar => format!("oscar://{host}:{port}{db_part}"),
             DatabaseType::Tdengine => format!("tdengine://{host}:{port}{db_part}"),
             DatabaseType::Xugu => format!("xugu://{host}:{port}{db_part}"),
             DatabaseType::Iotdb => {
@@ -997,6 +1000,9 @@ impl ConnectionConfig {
             }
             DatabaseType::Sundb => {
                 format!("sundb://{}:{}@{host}:{port}{db_part}", username, password)
+            }
+            DatabaseType::Oscar => {
+                format!("oscar://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Tdengine => {
                 format!("tdengine://{}:{}@{host}:{port}{db_part}", username, password)
@@ -1239,9 +1245,18 @@ fn normalize_mongo_uri_query_path(uri: &str) -> String {
 }
 
 fn mongo_uri_has_multiple_seeds(uri: &str) -> bool {
+    if mongo_uri_is_srv(uri) {
+        // The Rust MongoDB driver resolves SRV records into a seed list, so an
+        // SRV URL must not keep directConnection=true even with one hostname.
+        return true;
+    }
     mongo_uri_host_section(uri)
         .map(|hosts| hosts.split(',').filter(|host| !host.trim().is_empty()).count() > 1)
         .unwrap_or(false)
+}
+
+fn mongo_uri_is_srv(uri: &str) -> bool {
+    uri.get(..14).is_some_and(|scheme| scheme.eq_ignore_ascii_case("mongodb+srv://"))
 }
 
 fn mongo_uri_host_section(uri: &str) -> Option<&str> {
@@ -2172,6 +2187,14 @@ mod tests {
     }
 
     #[test]
+    fn oscar_url_defaults_to_osrdb_database() {
+        let mut config = mysql_config("SYSDBA", "secret", None);
+        config.db_type = DatabaseType::Oscar;
+
+        assert_eq!(config.connection_url(), "oscar://SYSDBA:secret@10.1.2.3:2883/osrdb");
+    }
+
+    #[test]
     fn mongodb_form_url_without_params_defaults_auth_source_to_admin() {
         let config = mongodb_config("root", "secret", Some("admin"));
 
@@ -2393,6 +2416,19 @@ mod tests {
         let url = config.connection_url();
 
         assert_eq!(url, "mongodb://read:pass@host1:27017,host2:27017/admin?replicaSet=rs0&authSource=admin");
+    }
+
+    #[test]
+    fn mongodb_srv_connection_string_removes_direct_connection_true() {
+        let mut config = mongodb_config("root", "secret", Some("admin"));
+        config.connection_string = Some(
+            "mongodb+srv://read:pass@cluster.example.net/admin?tls=true&authSource=admin&directConnection=true&replicaSet=rs0"
+                .to_string(),
+        );
+
+        let url = config.connection_url();
+
+        assert_eq!(url, "mongodb+srv://read:pass@cluster.example.net/admin?tls=true&authSource=admin&replicaSet=rs0");
     }
 
     #[test]

@@ -34,6 +34,8 @@ import {
   type DesktopIconTheme,
   type InterfaceLayout,
   type DisconnectTabHandlingMode,
+  type OpenTabsRestoreMode,
+  type SqlSemanticDiagnosticsMode,
   type UpdateDownloadSource,
   type CustomThemeColors,
   type CustomTheme,
@@ -66,7 +68,8 @@ import { SHORTCUT_DEFINITIONS, findShortcutConflict, normalizeShortcutSettings, 
 import { normalizeSidebarHiddenTablePrefixes } from "@/lib/sidebarTableNameDisplay";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sqlFormatterConfig";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES } from "@/lib/tableColumnTemplates";
-import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry } from "@/lib/mcpConfigTemplates";
+import { buildMcpCodexConfig, buildMcpJsonConfig, buildMcpOpenCodeConfig, buildMcpVsCodeConfig, type McpEnvEntry, type McpLaunchConfig } from "@/lib/mcpConfigTemplates";
+import { isWindows } from "@/lib/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/tableStructureEditorState";
 import type { DatabaseType, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/utils";
@@ -92,7 +95,8 @@ let cachedSystemFonts: string[] | null = null;
 let pendingSystemFonts: Promise<string[]> | null = null;
 
 const props = defineProps<{
-  open: boolean;
+  open?: boolean;
+  variant?: "dialog" | "page";
   initialTab?: string;
   initialSection?: string;
   appVersion?: string;
@@ -101,6 +105,23 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:open": [value: boolean];
 }>();
+
+const isSettingsPage = computed(() => props.variant === "page");
+const settingsVisible = computed(() => isSettingsPage.value || props.open === true);
+const settingsRootComponent = computed(() => (isSettingsPage.value ? "div" : Dialog));
+const settingsRootProps = computed(() => (isSettingsPage.value ? {} : { open: props.open === true }));
+const settingsRootClass = computed(() => (isSettingsPage.value ? "h-full min-h-0 overflow-hidden bg-background" : ""));
+const settingsContentComponent = computed(() => (isSettingsPage.value ? "div" : DialogContent));
+const settingsContentClass = computed(() => (isSettingsPage.value ? "flex h-full min-h-0 flex-col gap-4 overflow-hidden bg-background p-4" : "h-[min(660px,calc(100dvh-80px))] !max-w-[min(920px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:!max-w-[min(920px,calc(100vw-48px))]"));
+const settingsTitleComponent = computed(() => (isSettingsPage.value ? "h2" : DialogTitle));
+
+function onSettingsRootOpenChange(value: boolean) {
+  if (!isSettingsPage.value) emit("update:open", value);
+}
+
+function closeSettings() {
+  emit("update:open", false);
+}
 
 interface TableColumnTemplateOverrideRow {
   id: string;
@@ -190,6 +211,8 @@ const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editShowExecutionTargetPicker = ref(settingsStore.editorSettings.showExecutionTargetPicker);
 const editAutoAliasTables = ref(settingsStore.editorSettings.autoAliasTables);
 const editWordWrap = ref(settingsStore.editorSettings.wordWrap);
+const editSqlSemanticDiagnosticsMode = ref<SqlSemanticDiagnosticsMode>(settingsStore.editorSettings.sqlSemanticDiagnosticsMode);
+const editSqlSemanticDiagnosticsEnabled = ref(settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled);
 const editConfirmDangerousSqlExecution = ref(settingsStore.editorSettings.confirmDangerousSqlExecution);
 const editAppLayout = ref(settingsStore.editorSettings.appLayout);
 const editShowTrayIcon = ref(settingsStore.desktopSettings.show_tray_icon);
@@ -219,6 +242,7 @@ const editSidebarActivation = ref(settingsStore.editorSettings.sidebarActivation
 const editSidebarObjectDisplay = ref(settingsStore.editorSettings.sidebarObjectDisplay);
 const sidebarObjectDisplayHelp = ref<"grouped" | "simple" | null>(null);
 const editAutoSelectActiveSidebarNode = ref(settingsStore.editorSettings.autoSelectActiveSidebarNode);
+const editOpenTabsRestoreMode = ref<OpenTabsRestoreMode>(settingsStore.editorSettings.openTabsRestoreMode);
 const editDisconnectTabHandlingMode = ref<DisconnectTabHandlingMode>(settingsStore.editorSettings.disconnectTabHandlingMode);
 const editReuseDataTab = ref(settingsStore.editorSettings.reuseDataTab);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
@@ -455,7 +479,7 @@ async function loadSystemFontOptions() {
 
 // Sync from store when dialog opens
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   (open) => {
     if (open) {
       editFontFamily.value = settingsStore.editorSettings.fontFamily;
@@ -468,6 +492,8 @@ watch(
       editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
       editAutoAliasTables.value = settingsStore.editorSettings.autoAliasTables;
       editWordWrap.value = settingsStore.editorSettings.wordWrap;
+      editSqlSemanticDiagnosticsMode.value = settingsStore.editorSettings.sqlSemanticDiagnosticsMode;
+      editSqlSemanticDiagnosticsEnabled.value = settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled;
       editConfirmDangerousSqlExecution.value = settingsStore.editorSettings.confirmDangerousSqlExecution;
       editAppLayout.value = settingsStore.editorSettings.appLayout;
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
@@ -488,6 +514,7 @@ watch(
       editSidebarActivation.value = settingsStore.editorSettings.sidebarActivation;
       editSidebarObjectDisplay.value = settingsStore.editorSettings.sidebarObjectDisplay;
       editAutoSelectActiveSidebarNode.value = settingsStore.editorSettings.autoSelectActiveSidebarNode;
+      editOpenTabsRestoreMode.value = settingsStore.editorSettings.openTabsRestoreMode;
       editDisconnectTabHandlingMode.value = settingsStore.editorSettings.disconnectTabHandlingMode;
       editReuseDataTab.value = settingsStore.editorSettings.reuseDataTab;
       editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
@@ -532,6 +559,8 @@ function hasChanges(): boolean {
     editShowExecutionTargetPicker.value !== settingsStore.editorSettings.showExecutionTargetPicker ||
     editAutoAliasTables.value !== settingsStore.editorSettings.autoAliasTables ||
     editWordWrap.value !== settingsStore.editorSettings.wordWrap ||
+    editSqlSemanticDiagnosticsMode.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsMode ||
+    editSqlSemanticDiagnosticsEnabled.value !== settingsStore.editorSettings.sqlSemanticDiagnosticsEnabled ||
     editConfirmDangerousSqlExecution.value !== settingsStore.editorSettings.confirmDangerousSqlExecution ||
     editAppLayout.value !== settingsStore.editorSettings.appLayout ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
@@ -551,6 +580,7 @@ function hasChanges(): boolean {
     editSidebarActivation.value !== settingsStore.editorSettings.sidebarActivation ||
     editSidebarObjectDisplay.value !== settingsStore.editorSettings.sidebarObjectDisplay ||
     editAutoSelectActiveSidebarNode.value !== settingsStore.editorSettings.autoSelectActiveSidebarNode ||
+    editOpenTabsRestoreMode.value !== settingsStore.editorSettings.openTabsRestoreMode ||
     editDisconnectTabHandlingMode.value !== settingsStore.editorSettings.disconnectTabHandlingMode ||
     editReuseDataTab.value !== settingsStore.editorSettings.reuseDataTab ||
     editUpdateNotificationsEnabled.value !== settingsStore.editorSettings.updateNotificationsEnabled ||
@@ -582,6 +612,7 @@ async function persistSettings() {
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     autoAliasTables: editAutoAliasTables.value,
     wordWrap: editWordWrap.value,
+    sqlSemanticDiagnosticsMode: editSqlSemanticDiagnosticsMode.value,
     confirmDangerousSqlExecution: editConfirmDangerousSqlExecution.value,
     appLayout: editAppLayout.value,
     showColumnCommentsInHeader: editShowColumnCommentsInHeader.value,
@@ -596,6 +627,7 @@ async function persistSettings() {
     sidebarActivation: editSidebarActivation.value,
     sidebarObjectDisplay: editSidebarObjectDisplay.value,
     autoSelectActiveSidebarNode: editAutoSelectActiveSidebarNode.value,
+    openTabsRestoreMode: editOpenTabsRestoreMode.value,
     disconnectTabHandlingMode: editDisconnectTabHandlingMode.value,
     reuseDataTab: editReuseDataTab.value,
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
@@ -632,7 +664,7 @@ async function applySettings() {
 
 async function applySettingsAndClose() {
   await persistSettings();
-  emit("update:open", false);
+  closeSettings();
 }
 
 function resetDefaultsForTab(tab: SettingsCategory) {
@@ -643,6 +675,8 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
     editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+    editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
+    editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
     editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   } else if (tab === "formatter") {
     editSqlFormatter.value = normalizeSqlFormatterSettings(DEFAULT_EDITOR_SETTINGS.sqlFormatter);
@@ -663,6 +697,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
     editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
     editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+    editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
     editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
     editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -702,6 +737,8 @@ function resetAllDefaults() {
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editAutoAliasTables.value = DEFAULT_EDITOR_SETTINGS.autoAliasTables;
   editWordWrap.value = DEFAULT_EDITOR_SETTINGS.wordWrap;
+  editSqlSemanticDiagnosticsMode.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsMode;
+  editSqlSemanticDiagnosticsEnabled.value = DEFAULT_EDITOR_SETTINGS.sqlSemanticDiagnosticsEnabled;
   editConfirmDangerousSqlExecution.value = DEFAULT_EDITOR_SETTINGS.confirmDangerousSqlExecution;
   editAppLayout.value = DEFAULT_EDITOR_SETTINGS.appLayout;
   editShowTrayIcon.value = DEFAULT_DESKTOP_SETTINGS.show_tray_icon;
@@ -723,6 +760,7 @@ function resetAllDefaults() {
   editSidebarActivation.value = DEFAULT_EDITOR_SETTINGS.sidebarActivation;
   editSidebarObjectDisplay.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectDisplay;
   editAutoSelectActiveSidebarNode.value = DEFAULT_EDITOR_SETTINGS.autoSelectActiveSidebarNode;
+  editOpenTabsRestoreMode.value = DEFAULT_EDITOR_SETTINGS.openTabsRestoreMode;
   editDisconnectTabHandlingMode.value = DEFAULT_EDITOR_SETTINGS.disconnectTabHandlingMode;
   editReuseDataTab.value = DEFAULT_EDITOR_SETTINGS.reuseDataTab;
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
@@ -864,6 +902,11 @@ function isTableColumnTemplateLengthDisabled(row: TableColumnTemplateGridRow): b
 
 function onExecuteModeChange(v: any) {
   if (v === "all" || v === "current") editExecuteMode.value = v;
+}
+
+function onSqlSemanticDiagnosticsEnabledChange(value: boolean) {
+  editSqlSemanticDiagnosticsEnabled.value = value;
+  editSqlSemanticDiagnosticsMode.value = value ? "enabled" : "disabled";
 }
 
 function onFontFamilyChange(v: any) {
@@ -1097,13 +1140,21 @@ const mcpEnvEntries = computed<McpEnvEntry[]>(() => {
   return entries;
 });
 
-const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpEnvEntries.value));
+const mcpLaunchConfig = computed<McpLaunchConfig | undefined>(() => {
+  if (!isWindows() || !mcpStatus.value?.script_path) return undefined;
+  return {
+    command: mcpStatus.value.node_path || "node",
+    args: [mcpStatus.value.script_path],
+  };
+});
 
-const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpEnvEntries.value));
+const mcpJsonRecommendedConfig = computed(() => buildMcpJsonConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
-const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpEnvEntries.value));
+const mcpVsCodeRecommendedConfig = computed(() => buildMcpVsCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
-const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpEnvEntries.value));
+const mcpCodexRecommendedConfig = computed(() => buildMcpCodexConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
+
+const mcpOpenCodeRecommendedConfig = computed(() => buildMcpOpenCodeConfig(mcpEnvEntries.value, mcpLaunchConfig.value));
 
 const mcpStatusTone = computed<"ok" | "warning" | "muted">(() => {
   if (!mcpStatus.value) return "muted";
@@ -1319,7 +1370,7 @@ async function scrollToInitialSettingsSection() {
 }
 
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   async (open) => {
     if (open) {
       activeSettingsTab.value = props.initialTab || "editor";
@@ -1348,7 +1399,16 @@ watch(
 watch(
   () => props.initialSection,
   () => {
-    if (props.open) void scrollToInitialSettingsSection();
+    if (settingsVisible.value) void scrollToInitialSettingsSection();
+  },
+);
+
+watch(
+  () => props.initialTab,
+  (tab) => {
+    if (!settingsVisible.value || !tab) return;
+    activeSettingsTab.value = tab;
+    void scrollToInitialSettingsSection();
   },
 );
 
@@ -1822,14 +1882,19 @@ watch(
 
 let previewInitialized = false;
 
+function cleanupPreviewEditor() {
+  if (!previewView.value) return;
+  previewView.value.destroy();
+  previewView.value = null;
+  previewInitialized = false;
+  fontThemeComp = null;
+  themeComp = null;
+  editorViewModule = null;
+}
+
 watch(activeSettingsTab, (tab) => {
   if (tab !== "editor" && previewView.value) {
-    previewView.value.destroy();
-    previewView.value = null;
-    previewInitialized = false;
-    fontThemeComp = null;
-    themeComp = null;
-    editorViewModule = null;
+    cleanupPreviewEditor();
   }
 });
 
@@ -1856,28 +1921,23 @@ watch(previewRef, async (el) => {
 });
 
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   (open) => {
-    if (!open && previewView.value) {
-      previewView.value.destroy();
-      previewView.value = null;
-      previewInitialized = false;
-      fontThemeComp = null;
-      themeComp = null;
-      editorViewModule = null;
-    }
+    if (!open) cleanupPreviewEditor();
   },
 );
+
+onUnmounted(cleanupPreviewEditor);
 </script>
 
 <template>
-  <Dialog :open="open" @update:open="(v: boolean) => emit('update:open', v)">
-    <DialogContent class="h-[min(660px,calc(100dvh-80px))] !max-w-[min(920px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:!max-w-[min(920px,calc(100vw-48px))]">
+  <component :is="settingsRootComponent" v-bind="settingsRootProps" :class="settingsRootClass" @update:open="onSettingsRootOpenChange">
+    <component :is="settingsContentComponent" :class="settingsContentClass">
       <DialogHeader>
-        <DialogTitle class="flex items-center gap-2">
+        <component :is="settingsTitleComponent" class="flex items-center gap-2 text-base leading-none font-medium cn-font-heading">
           <Settings class="h-4 w-4" />
           {{ t("settings.title") }}
-        </DialogTitle>
+        </component>
       </DialogHeader>
 
       <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:flex-row">
@@ -2005,14 +2065,26 @@ watch(
                 </div>
               </div>
 
-              <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
-                <div class="space-y-1">
-                  <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
-                  <p class="text-xs text-muted-foreground">
-                    {{ t("settings.confirmDangerousSqlExecutionDescription") }}
-                  </p>
+              <div class="grid gap-3 md:grid-cols-2">
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-sql-semantic-diagnostics">{{ t("settings.sqlSemanticDiagnosticsEnabled") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.sqlSemanticDiagnosticsEnabledDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-sql-semantic-diagnostics" :model-value="editSqlSemanticDiagnosticsEnabled" class="mt-0.5" @update:model-value="onSqlSemanticDiagnosticsEnabledChange" />
                 </div>
-                <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+
+                <div class="flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="space-y-1">
+                    <Label for="editor-confirm-dangerous-sql">{{ t("settings.confirmDangerousSqlExecution") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.confirmDangerousSqlExecutionDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-confirm-dangerous-sql" v-model="editConfirmDangerousSqlExecution" class="mt-0.5" />
+                </div>
               </div>
 
               <Separator />
@@ -2085,6 +2157,7 @@ watch(
                         >
                           <X class="h-4 w-4" />
                         </Button>
+                        <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
                       </div>
                       <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
                         {{ t("settings.shortcutConflict") }}
@@ -2487,6 +2560,27 @@ watch(
               </div>
               <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
                 <div class="flex items-center gap-2">
+                  <Label for="open-tabs-restore-mode">{{ t("settings.openTabsRestoreMode") }}</Label>
+                  <HelpTooltip :label="t('settings.openTabsRestoreMode')">
+                    {{ t("settings.openTabsRestoreModeDescription") }}
+                  </HelpTooltip>
+                </div>
+                <Select :model-value="editOpenTabsRestoreMode" @update:model-value="(value) => (editOpenTabsRestoreMode = value as OpenTabsRestoreMode)">
+                  <SelectTrigger id="open-tabs-restore-mode" class="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">{{ t("settings.openTabsRestoreModeAll") }}</SelectItem>
+                    <SelectItem value="pinned">{{ t("settings.openTabsRestoreModePinned") }}</SelectItem>
+                    <SelectItem value="none">{{ t("settings.openTabsRestoreModeNone") }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p class="text-xs text-muted-foreground">
+                  {{ t("settings.openTabsRestoreModeHint") }}
+                </p>
+              </div>
+              <div class="space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                <div class="flex items-center gap-2">
                   <Label for="disconnect-tab-handling-mode">{{ t("settings.disconnectTabHandlingMode") }}</Label>
                   <HelpTooltip :label="t('settings.disconnectTabHandlingMode')">
                     {{ t("settings.disconnectTabHandlingModeDescription") }}
@@ -2765,6 +2859,7 @@ watch(
                       >
                         <X class="h-4 w-4" />
                       </Button>
+                      <span v-else-if="editingShortcutId !== definition.id" class="h-7 w-7 shrink-0" aria-hidden="true" />
                     </div>
                     <p v-if="shortcutConflicts.includes(definition.id)" class="text-xs text-destructive">
                       {{ t("settings.shortcutConflict") }}
@@ -3481,7 +3576,7 @@ watch(
               {{ t("settings.resetDefaults") }}
             </Button>
             <div class="flex-1" />
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
@@ -3518,12 +3613,12 @@ watch(
                 </Button>
               </span>
             </div>
-            <Button variant="outline" @click="emit('update:open', false)">{{ t("common.close") }}</Button>
+            <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
             <Button :disabled="!aiHasChanges() || !!aiCodexValidationError" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'sync'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <p v-if="webdavMessage" class="text-xs self-center truncate max-w-[280px]" :class="webdavError ? 'text-destructive' : 'text-green-500'">
@@ -3547,7 +3642,7 @@ watch(
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'mcp' && !isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <div class="flex-1" />
@@ -3563,7 +3658,7 @@ watch(
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'security' && isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="changingPassword || !oldPassword || !newPassword || !confirmNewPassword" @click="changePassword">
@@ -3576,7 +3671,7 @@ watch(
               {{ t("settings.resetAllDefaults") }}
             </Button>
             <div class="flex-1" />
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
@@ -3588,7 +3683,7 @@ watch(
           </DialogFooter>
         </div>
       </div>
-    </DialogContent>
+    </component>
 
     <!-- Theme Customizer Dialog -->
     <ThemeCustomizerDialog v-model:open="showThemeCustomizer" :themes="editCustomThemes" :active-theme-id="editActiveCustomThemeId" @save="handleThemeSave" />
@@ -3628,5 +3723,5 @@ watch(
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  </Dialog>
+  </component>
 </template>

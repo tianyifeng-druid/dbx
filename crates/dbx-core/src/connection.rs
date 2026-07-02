@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use mysql_async::prelude::Queryable;
@@ -96,6 +96,22 @@ pub enum PoolKind {
     Nacos,
 }
 
+/// Held connection for a manual transaction session
+pub enum TxnConnection {
+    Postgres(Box<deadpool_postgres::Object>),
+    Mysql(mysql_async::Conn),
+}
+
+pub struct TransactionSession {
+    pub connection: Arc<Mutex<TxnConnection>>,
+    pub pool_key: String,
+    pub last_activity: std::time::Instant,
+    pub busy: bool,
+    pub connection_id: String,
+    pub database: String,
+    pub schema: Option<String>,
+}
+
 macro_rules! agent_connection_pool_database_type {
     () => {
         DatabaseType::Dameng
@@ -125,6 +141,7 @@ macro_rules! agent_connection_pool_database_type {
             | DatabaseType::Bigquery
             | DatabaseType::Kylin
             | DatabaseType::Sundb
+            | DatabaseType::Oscar
             | DatabaseType::Tdengine
             | DatabaseType::Xugu
             | DatabaseType::Iotdb
@@ -151,6 +168,7 @@ pub struct AppState {
     /// PostgreSQL TLS cancel context, keyed by pool_key.
     /// Used to reconstruct a TLS connector compatible with the original connection when cancelling.
     postgres_cancel_contexts: Arc<RwLock<HashMap<String, db::postgres::PostgresCancelContext>>>,
+    pub transaction_sessions: Arc<RwLock<HashMap<String, TransactionSession>>>,
     #[cfg(feature = "mq-admin")]
     pub mq_registry: crate::mq::MqAdminRegistry,
 }
@@ -418,6 +436,7 @@ impl AppState {
             ),
             nacos_registry: crate::nacos::NacosAdminRegistry::new(),
             postgres_cancel_contexts: Arc::new(RwLock::new(HashMap::new())),
+            transaction_sessions: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(feature = "mq-admin")]
             mq_registry: crate::mq::MqAdminRegistry::new(),
         }
@@ -881,6 +900,7 @@ impl AppState {
                     &db_config.username,
                     &db_config.password,
                     db_config.database.as_deref(),
+                    db_config.url_params.as_deref(),
                     connect_timeout,
                 )
                 .await?;
@@ -1018,8 +1038,18 @@ impl AppState {
                 // connectivity via the mq_registry and insert a marker so this
                 // connection_id is recognized as valid.
                 let mqc = self.mq_admin_config_for_connection(connection_id, &config).await?;
-                let adapter = self.mq_registry.build_transient_config(mqc).await?;
-                adapter.test_connection().await?;
+                let kafka_launch = crate::mq::service::resolve_kafka_launch_spec(&mqc, self);
+                let adapter = match self.mq_registry.get_or_build_config(connection_id, mqc, kafka_launch).await {
+                    Ok(adapter) => adapter,
+                    Err(err) => {
+                        self.mq_registry.drop_connection(connection_id).await;
+                        return Err(err);
+                    }
+                };
+                if let Err(err) = adapter.test_connection().await {
+                    self.mq_registry.drop_connection(connection_id).await;
+                    return Err(err);
+                }
                 PoolKind::MessageQueue
             }
             #[cfg(not(feature = "mq-admin"))]

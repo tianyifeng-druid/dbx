@@ -636,6 +636,7 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
                 &config.username,
                 &config.password,
                 config.database.as_deref(),
+                config.url_params.as_deref(),
                 connect_timeout,
             )
             .await
@@ -735,8 +736,18 @@ pub async fn test_connection(state: State<'_, Arc<AppState>>, config: Connection
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
-                let adapter = state.mq_registry.build_transient_config(mqc).await?;
-                adapter.test_connection().await?;
+                let kafka_launch = dbx_core::mq::service::resolve_kafka_launch_spec(&mqc, &state);
+                let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, kafka_launch).await {
+                    Ok(adapter) => adapter,
+                    Err(err) => {
+                        state.mq_registry.drop_connection(connection_id).await;
+                        return Err(err);
+                    }
+                };
+                if let Err(err) = adapter.test_connection().await {
+                    state.mq_registry.drop_connection(connection_id).await;
+                    return Err(err);
+                }
                 Ok("Connection successful".to_string())
             }
             #[cfg(not(feature = "mq-admin"))]
@@ -923,6 +934,7 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
                 &db_config.username,
                 &db_config.password,
                 db_config.database.as_deref(),
+                db_config.url_params.as_deref(),
                 connect_timeout,
             )
             .await?;
@@ -1018,8 +1030,18 @@ pub async fn connect_db(state: State<'_, Arc<AppState>>, config: ConnectionConfi
         #[cfg(feature = "mq-admin")]
         DatabaseType::MessageQueue => {
             let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
-            let adapter = state.mq_registry.build_transient_config(mqc).await?;
-            adapter.test_connection().await?;
+            let kafka_launch = dbx_core::mq::service::resolve_kafka_launch_spec(&mqc, &state);
+            let adapter = match state.mq_registry.get_or_build_config(&id, mqc, kafka_launch).await {
+                Ok(adapter) => adapter,
+                Err(err) => {
+                    state.mq_registry.drop_connection(&id).await;
+                    return Err(err);
+                }
+            };
+            if let Err(err) = adapter.test_connection().await {
+                state.mq_registry.drop_connection(&id).await;
+                return Err(err);
+            }
             PoolKind::MessageQueue
         }
         #[cfg(not(feature = "mq-admin"))]

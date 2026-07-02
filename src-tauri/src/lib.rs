@@ -582,7 +582,7 @@ pub fn run() {
             open_connection_deep_links(app.handle(), startup_links);
 
             let app_handle = app.handle().clone();
-            commands::mcp_bridge::start(app_handle, state);
+            commands::mcp_bridge::start(app_handle, state, data_dir);
             eprintln!("[STARTUP] setup complete in {:?} (total {:?})", setup_start.elapsed(), startup_begin.elapsed());
 
             if let Some(decorations) = native_window_decorations_override(std::env::consts::OS) {
@@ -717,6 +717,10 @@ pub fn run() {
             commands::query::execute_batch,
             commands::query::execute_script,
             commands::query::execute_in_transaction,
+            commands::query::begin_manual_transaction,
+            commands::query::execute_in_manual_transaction,
+            commands::query::commit_manual_transaction,
+            commands::query::rollback_manual_transaction,
             commands::query::analyze_sql_references,
             commands::query::find_statement_at_cursor,
             commands::query::prepare_query_pagination_execution_plan,
@@ -741,6 +745,7 @@ pub fn run() {
             commands::query::build_create_schema_sql,
             commands::query::build_drop_schema_sql,
             commands::query::build_duplicate_table_structure_sql,
+            commands::query::build_copy_table_data_sql,
             commands::query::build_executable_object_source_statements,
             commands::query::build_executable_object_source_sql,
             commands::query::build_editable_object_source,
@@ -843,17 +848,25 @@ pub fn run() {
             commands::sqlite_backup::backup_sqlite_database,
             commands::mongo_cmd::mongo_list_databases,
             commands::mongo_cmd::mongo_list_collections,
+            commands::mongo_cmd::vector_collection_detail,
             commands::mongo_cmd::mongo_create_database,
             commands::mongo_cmd::mongo_drop_database,
             commands::mongo_cmd::mongo_drop_collection,
-            commands::mongo_cmd::document_find_documents,
+            commands::document_cmd::document_list_databases,
+            commands::document_cmd::document_list_collections,
+            commands::document_cmd::document_find_documents,
             commands::mongo_cmd::mongo_find_documents,
             commands::mongo_cmd::mongo_server_version,
             commands::mongo_cmd::mongo_aggregate_documents,
+            commands::mongo_cmd::mongo_create_index,
+            commands::mongo_cmd::mongo_drop_indexes,
+            commands::document_cmd::document_insert_document,
             commands::mongo_cmd::mongo_insert_document,
             commands::mongo_cmd::mongo_insert_documents,
+            commands::document_cmd::document_update_document,
             commands::mongo_cmd::mongo_update_document,
             commands::mongo_cmd::mongo_update_documents,
+            commands::document_cmd::document_delete_document,
             commands::mongo_cmd::mongo_delete_document,
             commands::mongo_cmd::mongo_delete_documents,
             #[cfg(feature = "mq-admin")]
@@ -935,7 +948,11 @@ pub fn run() {
             #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_get_backlog,
             #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_get_cluster_info,
+            #[cfg(feature = "mq-admin")]
             commands::mq_cmd::mq_raw_request,
+            #[cfg(feature = "mq-admin")]
+            commands::mq_cmd::mq_send_message,
             commands::history::save_history,
             commands::history::load_history,
             commands::history::clear_history,
